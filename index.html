@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Rota Defteri — Yolculuk Planlayıcı</title>
+<meta name="theme-color" content="#0e1524">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 rx=%2222%22 fill=%22%230e1524%22/><path d=%22M20 70 L50 25 L80 70%22 stroke=%22%23ff8a4c%22 stroke-width=%228%22 fill=%22none%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22/></svg>">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">⟁</span>
+    <span class="brand-name">Rota Defteri</span>
+  </div>
+  <nav class="side-nav">
+    <button class="nav-btn active" data-view="home">Ana Sayfa</button>
+    <button class="nav-btn" data-view="trips">Yolculuklar</button>
+    <button class="nav-btn" data-view="map">Harita</button>
+    <button class="nav-btn" data-view="favorites">Favoriler</button>
+    <button class="nav-btn" data-view="settings">Ayarlar</button>
+  </nav>
+</header>
+
+<main id="app">
+
+  <!-- ANA SAYFA -->
+  <section id="view-home" class="view active">
+    <h1 class="page-title">İyi yolculuklar.</h1>
+    <p class="page-sub">Uzun yolun her etabı — mola, yemek, hava, yakıt — tek ekranda.</p>
+
+    <div id="upcoming-card-slot"></div>
+
+    <button id="btn-new-trip" class="cta-btn">+ Yeni Yolculuk Oluştur</button>
+
+    <h2 class="section-title">Kayıtlı Yolculuklar</h2>
+    <div id="saved-trips-list" class="trip-list"></div>
+  </section>
+
+  <!-- YENİ YOLCULUK FORMU -->
+  <section id="view-new-trip" class="view">
+    <button class="back-btn" data-back="home">← Geri</button>
+    <h1 class="page-title">Yeni Yolculuk</h1>
+
+    <form id="trip-form" class="form">
+      <label>Başlangıç noktası
+        <div class="input-row">
+          <input type="text" id="f-start" placeholder="Örn. İstanbul, Kadıköy" required>
+          <button type="button" class="mini-btn" id="btn-use-location" title="Mevcut konumu kullan">📍</button>
+        </div>
+      </label>
+
+      <label>Varış noktası
+        <input type="text" id="f-end" placeholder="Örn. Antalya" required>
+      </label>
+
+      <div class="grid-2">
+        <label>Yolculuk tarihi
+          <input type="date" id="f-date" required>
+        </label>
+        <label>Tahmini çıkış saati
+          <input type="time" id="f-time" value="09:00" required>
+        </label>
+      </div>
+
+      <div class="grid-2">
+        <label>Yolcu sayısı
+          <input type="number" id="f-passengers" min="1" max="9" value="1">
+        </label>
+        <label>Çocuk var mı?
+          <select id="f-children">
+            <option value="hayir">Hayır</option>
+            <option value="evet">Evet</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="grid-2">
+        <label>Mola sıklığı
+          <select id="f-break-interval">
+            <option value="60">Her 1 saatte</option>
+            <option value="90">Her 1,5 saatte</option>
+            <option value="120" selected>Her 2 saatte</option>
+            <option value="150">Her 2,5 saatte</option>
+            <option value="180">Her 3 saatte</option>
+          </select>
+        </label>
+        <label>Mola süresi
+          <select id="f-break-duration">
+            <option value="10">10 dakika</option>
+            <option value="15" selected>15 dakika</option>
+            <option value="20">20 dakika</option>
+            <option value="30">30 dakika</option>
+            <option value="45">45 dakika</option>
+            <option value="60">60 dakika</option>
+          </select>
+        </label>
+      </div>
+
+      <details class="vehicle-details">
+        <summary>Araç ve yakıt bilgisi (opsiyonel)</summary>
+        <div class="grid-2">
+          <label>Yakıt türü
+            <select id="f-fuel-type">
+              <option value="benzin">Benzin</option>
+              <option value="dizel">Dizel</option>
+              <option value="lpg">LPG</option>
+              <option value="elektrik">Elektrik</option>
+            </select>
+          </label>
+          <label>Ort. tüketim (L veya kWh /100km)
+            <input type="number" id="f-consumption" step="0.1" value="7.0">
+          </label>
+        </div>
+        <label>Yakıt fiyatı (₺ / litre veya kWh)
+          <input type="number" id="f-fuel-price" step="0.1" value="45">
+        </label>
+      </details>
+
+      <button type="submit" class="cta-btn">Rotayı Oluştur</button>
+    </form>
+  </section>
+
+  <!-- ROTA SONUCU / YOLCULUK DETAY -->
+  <section id="view-trip" class="view">
+    <button class="back-btn" data-back="home">← Geri</button>
+    <div id="trip-detail"></div>
+  </section>
+
+  <!-- YOLCULUKLAR LİSTESİ -->
+  <section id="view-trips" class="view">
+    <h1 class="page-title">Yolculuklar</h1>
+    <div id="all-trips-list" class="trip-list"></div>
+  </section>
+
+  <!-- HARİTA -->
+  <section id="view-map" class="view">
+    <h1 class="page-title">Harita</h1>
+    <p class="hint-text">En son oluşturduğunuz rota burada görüntülenir.</p>
+    <div id="standalone-map" class="map-box"></div>
+  </section>
+
+  <!-- FAVORİLER -->
+  <section id="view-favorites" class="view">
+    <h1 class="page-title">Favoriler</h1>
+    <div id="favorites-list" class="trip-list"></div>
+    <p class="hint-text" id="favorites-empty-hint">Rota ekranında bir mekânı favorilere ekleyin, burada görünsün.</p>
+  </section>
+
+  <!-- AYARLAR -->
+  <section id="view-settings" class="view">
+    <h1 class="page-title">Ayarlar</h1>
+    <form class="form" id="settings-form">
+      <label>Ad
+        <input type="text" id="s-name" placeholder="Adınız">
+      </label>
+      <label>Ev adresi
+        <input type="text" id="s-home" placeholder="Ev adresiniz">
+      </label>
+      <label>Varsayılan yakıt fiyatı (₺)
+        <input type="number" id="s-fuel-price" step="0.1" value="45">
+      </label>
+      <label>Tercih edilen navigasyon uygulaması
+        <select id="s-nav-app">
+          <option value="google">Google Maps</option>
+          <option value="apple">Apple Haritalar</option>
+          <option value="yandex">Yandex Navigasyon</option>
+          <option value="waze">Waze</option>
+        </select>
+      </label>
+      <button type="submit" class="cta-btn">Ayarları Kaydet</button>
+    </form>
+
+    <h2 class="section-title">Veri Yönetimi</h2>
+    <div class="settings-actions">
+      <button class="secondary-btn" id="btn-export">Verileri Dışa Aktar (JSON)</button>
+      <button class="secondary-btn danger" id="btn-clear-data">Tüm Verileri Temizle</button>
+    </div>
+
+    <p class="hint-text">
+      Bu uygulama harita ve rota için OpenStreetMap tabanlı ücretsiz servisleri (OSRM, Nominatim, Overpass, Open-Meteo)
+      kullanır. Yoğun kullanımda bu servisler geçici olarak yanıt vermeyebilir; uygulama bu durumda size açıkça bilgi verir.
+    </p>
+  </section>
+
+</main>
+
+<nav class="bottom-nav">
+  <button class="bn-btn active" data-view="home"><span>🏠</span>Ana Sayfa</button>
+  <button class="bn-btn" data-view="trips"><span>🧭</span>Yolculuklar</button>
+  <button class="bn-btn" data-view="map"><span>🗺️</span>Harita</button>
+  <button class="bn-btn" data-view="favorites"><span>★</span>Favoriler</button>
+  <button class="bn-btn" data-view="settings"><span>⚙️</span>Ayarlar</button>
+</nav>
+
+<div id="toast-root"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

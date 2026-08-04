@@ -1,0 +1,24 @@
+{
+  "name": "Rota Defteri — Yolculuk Planlayıcı",
+  "short_name": "Rota Defteri",
+  "description": "Uzun yol ve tatil rotalarını, molaları, mekânları, hava durumunu ve yakıt maliyetini tek ekranda planlayın.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#0b1220",
+  "theme_color": "#0e1524",
+  "lang": "tr",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Crect width='192' height='192' rx='40' fill='%230e1524'/%3E%3Cpath d='M40 138 L96 50 L152 138' stroke='%23ff8a4c' stroke-width='16' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E",
+      "sizes": "192x192",
+      "type": "image/svg+xml"
+    },
+    {
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='100' fill='%230e1524'/%3E%3Cpath d='M110 370 L256 130 L402 370' stroke='%23ff8a4c' stroke-width='42' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E",
+      "sizes": "512x512",
+      "type": "image/svg+xml"
+    }
+  ]
+}

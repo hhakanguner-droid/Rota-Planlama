@@ -1,0 +1,777 @@
+/* ============================================================
+   ROTA DEFTERİ — Uzun Yol ve Tatil Rota Planlayıcı (Prototip)
+   Ücretsiz servisler: Nominatim (geocode), OSRM (rota),
+   Open-Meteo (hava), Overpass API (mekân)
+   ============================================================ */
+
+const STORAGE_KEYS = {
+  trips: 'rd_trips',
+  settings: 'rd_settings',
+  favorites: 'rd_favorites',
+};
+
+const DEFAULT_SETTINGS = {
+  name: '', home: '', fuelPrice: 45, navApp: 'google'
+};
+
+let state = {
+  trips: loadJSON(STORAGE_KEYS.trips, []),
+  favorites: loadJSON(STORAGE_KEYS.favorites, []),
+  settings: loadJSON(STORAGE_KEYS.settings, DEFAULT_SETTINGS),
+  currentTrip: null,   // yolculuk oluşturma sırasında geçici obje
+  map: null,
+  standaloneMap: null,
+  routeLayer: null,
+};
+
+function loadJSON(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch (e) { return fallback; }
+}
+function saveJSON(key, val) {
+  try { localStorage.setItem(key, JSON.stringify(val)); } catch (e) { /* depolama dolu olabilir */ }
+}
+
+function toast(msg) {
+  const root = document.getElementById('toast-root');
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.textContent = msg;
+  root.appendChild(el);
+  setTimeout(() => el.remove(), 3200);
+}
+
+/* ---------------- VIEW ROUTING ---------------- */
+function showView(name) {
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  const target = document.getElementById('view-' + name);
+  if (target) target.classList.add('active');
+  document.querySelectorAll('.nav-btn, .bn-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.view === name);
+  });
+  if (name === 'trips') renderAllTrips();
+  if (name === 'favorites') renderFavorites();
+  if (name === 'map') renderStandaloneMap();
+  if (name === 'settings') fillSettingsForm();
+  window.scrollTo(0, 0);
+}
+
+document.querySelectorAll('[data-view]').forEach(el => {
+  el.addEventListener('click', () => showView(el.dataset.view));
+});
+document.querySelectorAll('[data-back]').forEach(el => {
+  el.addEventListener('click', () => showView(el.dataset.back));
+});
+
+/* ---------------- HOME ---------------- */
+function renderHome() {
+  const slot = document.getElementById('upcoming-card-slot');
+  const upcoming = state.trips
+    .filter(t => t.status !== 'tamamlandı')
+    .sort((a, b) => new Date(a.date + 'T' + a.time) - new Date(b.date + 'T' + b.time))[0];
+
+  if (!upcoming) {
+    slot.innerHTML = '';
+  } else {
+    slot.innerHTML = `
+      <div class="upcoming-card" onclick="openTrip('${upcoming.id}')">
+        <div class="route-line">${esc(upcoming.start)} → ${esc(upcoming.end)}</div>
+        <div class="route-meta">${formatDateTR(upcoming.date)} · ${upcoming.time} çıkış</div>
+        <div class="stat-grid">
+          <div class="stat"><div class="val">${upcoming.distanceKm ? upcoming.distanceKm.toFixed(0) + ' km' : '—'}</div><div class="lbl">Mesafe</div></div>
+          <div class="stat"><div class="val">${upcoming.durationText || '—'}</div><div class="lbl">Toplam süre</div></div>
+          <div class="stat"><div class="val">${upcoming.arrivalText || '—'}</div><div class="lbl">Varış</div></div>
+        </div>
+      </div>`;
+  }
+
+  const list = document.getElementById('saved-trips-list');
+  const rest = state.trips.filter(t => t.id !== (upcoming && upcoming.id)).slice(0, 5);
+  if (rest.length === 0 && !upcoming) {
+    list.innerHTML = '<div class="empty-state">Henüz kayıtlı yolculuğunuz yok. Yukarıdan yeni bir yolculuk oluşturun.</div>';
+  } else {
+    list.innerHTML = rest.map(tripListItemHTML).join('');
+  }
+}
+
+function tripListItemHTML(t) {
+  return `<div class="trip-item" onclick="openTrip('${t.id}')">
+    <div>
+      <div class="ti-route">${esc(t.start)} → ${esc(t.end)}</div>
+      <div class="ti-meta">${formatDateTR(t.date)} · ${t.time} · ${t.distanceKm ? t.distanceKm.toFixed(0) + ' km' : 'mesafe hesaplanmadı'}</div>
+    </div>
+    <div>›</div>
+  </div>`;
+}
+
+function renderAllTrips() {
+  const list = document.getElementById('all-trips-list');
+  if (state.trips.length === 0) {
+    list.innerHTML = '<div class="empty-state">Henüz kayıtlı yolculuğunuz yok.</div>';
+    return;
+  }
+  const sorted = [...state.trips].sort((a, b) => new Date(b.date) - new Date(a.date));
+  list.innerHTML = sorted.map(tripListItemHTML).join('');
+}
+
+function renderFavorites() {
+  const list = document.getElementById('favorites-list');
+  const hint = document.getElementById('favorites-empty-hint');
+  if (state.favorites.length === 0) {
+    list.innerHTML = '';
+    hint.style.display = 'block';
+    return;
+  }
+  hint.style.display = 'none';
+  list.innerHTML = state.favorites.map(f => `
+    <div class="trip-item">
+      <div>
+        <div class="ti-route">${esc(f.name)}</div>
+        <div class="ti-meta">${esc(f.category || '')}</div>
+      </div>
+      <a href="https://www.google.com/maps/search/?api=1&query=${f.lat},${f.lon}" target="_blank" class="mini-btn" style="text-decoration:none">Haritada Aç</a>
+    </div>`).join('');
+}
+
+function esc(s) { return (s || '').toString().replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function formatDateTR(dateStr) {
+  if (!dateStr) return '';
+  const d = new Date(dateStr + 'T00:00:00');
+  return d.toLocaleDateString('tr-TR', { day: 'numeric', month: 'long', year: 'numeric' });
+}
+
+/* ---------------- YENİ YOLCULUK FORMU ---------------- */
+document.getElementById('btn-new-trip').addEventListener('click', () => {
+  document.getElementById('f-date').min = new Date().toISOString().slice(0, 10);
+  if (!document.getElementById('f-date').value) {
+    document.getElementById('f-date').value = new Date().toISOString().slice(0, 10);
+  }
+  showView('new-trip');
+});
+
+document.getElementById('btn-use-location').addEventListener('click', async () => {
+  if (!navigator.geolocation) { toast('Bu tarayıcı konum özelliğini desteklemiyor.'); return; }
+  toast('Konum alınıyor…');
+  navigator.geolocation.getCurrentPosition(async (pos) => {
+    const { latitude, longitude } = pos.coords;
+    const label = await reverseGeocode(latitude, longitude);
+    document.getElementById('f-start').value = label || `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`;
+    document.getElementById('f-start').dataset.lat = latitude;
+    document.getElementById('f-start').dataset.lon = longitude;
+  }, () => {
+    toast('Konum izni verilmedi. Adresi elle yazabilirsiniz.');
+  });
+});
+
+document.getElementById('trip-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const submitBtn = e.target.querySelector('button[type=submit]');
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'Rota hesaplanıyor…';
+
+  try {
+    const startText = document.getElementById('f-start').value.trim();
+    const endText = document.getElementById('f-end').value.trim();
+    const date = document.getElementById('f-date').value;
+    const time = document.getElementById('f-time').value;
+
+    if (!date || !time) { toast('Lütfen tarih ve saat girin.'); return; }
+    const departureDT = new Date(date + 'T' + time);
+    if (isNaN(departureDT.getTime())) { toast('Geçersiz tarih/saat.'); return; }
+
+    // 1) Geocode
+    const startCoord = document.getElementById('f-start').dataset.lat
+      ? { lat: +document.getElementById('f-start').dataset.lat, lon: +document.getElementById('f-start').dataset.lon, label: startText }
+      : await geocode(startText);
+    const endCoord = await geocode(endText);
+
+    if (!startCoord) { toast('Başlangıç adresi bulunamadı. Farklı bir yazım deneyin.'); return; }
+    if (!endCoord) { toast('Varış adresi bulunamadı. Farklı bir yazım deneyin.'); return; }
+
+    // 2) Route (OSRM)
+    const route = await fetchRoute(startCoord, endCoord);
+    if (!route) { toast('Rota hesaplanamadı. Rota servisi şu anda yanıt vermiyor olabilir.'); return; }
+
+    const trip = {
+      id: 'trip_' + Date.now(),
+      start: startText, end: endText,
+      startCoord, endCoord,
+      date, time,
+      passengers: +document.getElementById('f-passengers').value || 1,
+      children: document.getElementById('f-children').value === 'evet',
+      breakIntervalMin: +document.getElementById('f-break-interval').value,
+      breakDurationMin: +document.getElementById('f-break-duration').value,
+      fuelType: document.getElementById('f-fuel-type').value,
+      consumption: +document.getElementById('f-consumption').value || 7,
+      fuelPrice: +document.getElementById('f-fuel-price').value || state.settings.fuelPrice,
+      distanceKm: route.distanceKm,
+      driveMinutes: route.durationMin,
+      geometry: route.geometry,
+      breaks: [],
+      addedPois: [],
+      status: 'planlandı',
+      createdAt: Date.now(),
+    };
+
+    generateAutoBreaks(trip);
+    recalcTrip(trip);
+
+    state.trips.unshift(trip);
+    saveJSON(STORAGE_KEYS.trips, state.trips);
+    toast('Rota oluşturuldu.');
+    openTrip(trip.id);
+  } catch (err) {
+    console.error(err);
+    toast('Bir şeyler ters gitti. Lütfen tekrar deneyin.');
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Rotayı Oluştur';
+  }
+});
+
+/* ---------------- GEOCODING (Nominatim) ---------------- */
+async function geocode(text) {
+  if (!text) return null;
+  try {
+    const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=tr&q=${encodeURIComponent(text)}`;
+    const res = await fetch(url, { headers: { 'Accept-Language': 'tr' } });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data.length) {
+      // Türkiye dışı olabilir, ülke kısıtını kaldırarak tekrar dene
+      const url2 = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(text)}`;
+      const res2 = await fetch(url2, { headers: { 'Accept-Language': 'tr' } });
+      const data2 = await res2.json();
+      if (!data2.length) return null;
+      return { lat: +data2[0].lat, lon: +data2[0].lon, label: data2[0].display_name };
+    }
+    return { lat: +data[0].lat, lon: +data[0].lon, label: data[0].display_name };
+  } catch (e) { return null; }
+}
+async function reverseGeocode(lat, lon) {
+  try {
+    const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}`;
+    const res = await fetch(url, { headers: { 'Accept-Language': 'tr' } });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.display_name || null;
+  } catch (e) { return null; }
+}
+
+/* ---------------- ROUTING (OSRM demo sunucusu) ---------------- */
+async function fetchRoute(start, end) {
+  try {
+    const url = `https://router.project-osrm.org/route/v1/driving/${start.lon},${start.lat};${end.lon},${end.lat}?overview=full&geometries=geojson`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data.routes || !data.routes.length) return null;
+    const r = data.routes[0];
+    return {
+      distanceKm: r.distance / 1000,
+      durationMin: r.duration / 60,
+      geometry: r.geometry.coordinates, // [lon,lat] dizisi
+    };
+  } catch (e) { return null; }
+}
+
+/* ---------------- MOLA OLUŞTURMA ---------------- */
+function generateAutoBreaks(trip) {
+  const breaks = [];
+  const intervalMin = trip.breakIntervalMin;
+  let elapsed = 0;
+  let n = 1;
+  while (elapsed + intervalMin < trip.driveMinutes) {
+    elapsed += intervalMin;
+    const fraction = elapsed / trip.driveMinutes;
+    breaks.push({
+      id: 'brk_' + n,
+      order: n,
+      title: n % 3 === 0 ? 'Yakıt / Kahve Molası' : 'Kısa Dinlenme',
+      type: n % 3 === 0 ? 'yakit' : 'kisa',
+      durationMin: trip.breakDurationMin,
+      atDriveMinute: elapsed,
+      routeFraction: fraction,
+    });
+    n++;
+  }
+  trip.breaks = breaks;
+}
+
+function pointAtFraction(geometry, fraction) {
+  if (!geometry || !geometry.length) return null;
+  const idx = Math.min(geometry.length - 1, Math.max(0, Math.round(fraction * (geometry.length - 1))));
+  const [lon, lat] = geometry[idx];
+  return { lat, lon };
+}
+
+/* ---------------- YENİDEN HESAPLAMA ---------------- */
+function recalcTrip(trip) {
+  const totalBreakMin = trip.breaks.reduce((s, b) => s + b.durationMin, 0);
+  const addedPoiExtraMin = trip.addedPois.reduce((s, p) => s + (p.extraMinutes || 0) + (p.stayMinutes || 0), 0);
+  const totalMin = trip.driveMinutes + totalBreakMin + addedPoiExtraMin;
+
+  trip.totalBreakMin = totalBreakMin;
+  trip.totalMinutes = totalMin;
+  trip.durationText = minutesToText(totalMin);
+  trip.pureDriveText = minutesToText(trip.driveMinutes);
+
+  const dep = new Date(trip.date + 'T' + trip.time);
+  const arrival = new Date(dep.getTime() + totalMin * 60000);
+  trip.arrivalText = arrival.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
+  trip.arrivalDateText = arrival.toLocaleDateString('tr-TR', { day: 'numeric', month: 'long' });
+  trip.crossesMidnight = arrival.toDateString() !== dep.toDateString();
+
+  // yakıt maliyeti
+  if (trip.consumption && trip.distanceKm) {
+    trip.fuelAmount = (trip.distanceKm / 100) * trip.consumption;
+    trip.fuelCost = trip.fuelAmount * (trip.fuelPrice || 45);
+  }
+}
+
+function minutesToText(min) {
+  const h = Math.floor(min / 60);
+  const m = Math.round(min % 60);
+  if (h <= 0) return `${m} dakika`;
+  if (m === 0) return `${h} saat`;
+  return `${h} saat ${m} dakika`;
+}
+
+/* ---------------- YOLCULUK DETAY EKRANI ---------------- */
+let activeTabId = 'ozet';
+
+function openTrip(id) {
+  const trip = state.trips.find(t => t.id === id);
+  if (!trip) return;
+  state.currentTrip = trip;
+  activeTabId = 'ozet';
+  renderTripDetail(trip);
+  showView('trip');
+}
+
+function renderTripDetail(trip) {
+  const el = document.getElementById('trip-detail');
+  el.innerHTML = `
+    <h1 class="page-title">${esc(trip.start)} → ${esc(trip.end)}</h1>
+    <p class="page-sub">${formatDateTR(trip.date)} · ${trip.time} çıkış${trip.crossesMidnight ? ' · gece yarısını geçiyor' : ''}</p>
+
+    <div class="stat-grid">
+      <div class="stat"><div class="val">${trip.distanceKm.toFixed(0)} km</div><div class="lbl">Mesafe</div></div>
+      <div class="stat"><div class="val">${trip.pureDriveText}</div><div class="lbl">Saf sürüş</div></div>
+      <div class="stat"><div class="val">${minutesToText(trip.totalBreakMin)}</div><div class="lbl">Molalar</div></div>
+      <div class="stat"><div class="val">${trip.durationText}</div><div class="lbl">Toplam süre</div></div>
+      <div class="stat"><div class="val">${trip.arrivalText}</div><div class="lbl">Tahmini varış</div></div>
+      <div class="stat"><div class="val">${trip.fuelCost ? '₺' + trip.fuelCost.toFixed(0) : '—'}</div><div class="lbl">Yakıt maliyeti</div></div>
+    </div>
+
+    <div id="trip-map" class="map-box"></div>
+
+    <div class="tabs">
+      <button class="tab-btn" data-tab="ozet">Özet</button>
+      <button class="tab-btn" data-tab="molalar">Molalar</button>
+      <button class="tab-btn" data-tab="mekanlar">Mekânlar</button>
+      <button class="tab-btn" data-tab="hava">Hava Durumu</button>
+      <button class="tab-btn" data-tab="program">Program</button>
+    </div>
+
+    <div id="tab-content"></div>
+
+    <div class="nav-export-row">
+      <button onclick="openInGoogleMaps()">Google Maps'te Aç</button>
+      <button onclick="openInWaze()">Waze'de Aç</button>
+      <button onclick="exportTripJSON()">JSON Dışa Aktar</button>
+      <button onclick="deleteTrip('${trip.id}')" style="color:var(--bad)">Yolculuğu Sil</button>
+    </div>
+  `;
+
+  document.querySelectorAll('.tab-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.tab === activeTabId);
+    b.addEventListener('click', () => { activeTabId = b.dataset.tab; renderTripDetail(trip); });
+  });
+
+  renderMapForTrip(trip, 'trip-map');
+  renderTabContent(trip);
+}
+
+function renderTabContent(trip) {
+  const c = document.getElementById('tab-content');
+  if (activeTabId === 'ozet') c.innerHTML = renderOzetTab(trip);
+  if (activeTabId === 'molalar') { c.innerHTML = renderMolalarTab(trip); bindMolaEvents(trip); }
+  if (activeTabId === 'mekanlar') { c.innerHTML = '<div class="empty-state">Mekânlar yükleniyor…</div>'; loadAndRenderPois(trip); }
+  if (activeTabId === 'hava') { c.innerHTML = '<div class="empty-state">Hava durumu yükleniyor…</div>'; loadAndRenderWeather(trip); }
+  if (activeTabId === 'program') c.innerHTML = renderProgramTab(trip);
+}
+
+function renderOzetTab(trip) {
+  return `
+    <div class="card">
+      <div class="summary-row"><span class="lbl">Yolcu sayısı</span><span class="val">${trip.passengers}${trip.children ? ' (çocuklu)' : ''}</span></div>
+      <div class="summary-row"><span class="lbl">Mola sıklığı</span><span class="val">Her ${trip.breakIntervalMin} dakikada</span></div>
+      <div class="summary-row"><span class="lbl">Mola süresi</span><span class="val">${trip.breakDurationMin} dakika</span></div>
+      <div class="summary-row"><span class="lbl">Yakıt türü</span><span class="val">${trip.fuelType}</span></div>
+      <div class="summary-row"><span class="lbl">Tahmini yakıt</span><span class="val">${trip.fuelAmount ? trip.fuelAmount.toFixed(1) + (trip.fuelType === 'elektrik' ? ' kWh' : ' L') : '—'}</span></div>
+      <div class="summary-row"><span class="lbl">Tahmini varış tarihi</span><span class="val">${trip.arrivalDateText}, ${trip.arrivalText}</span></div>
+    </div>
+    <div class="warning-box">Trafik gecikmesi ve yol çalışması verileri için canlı, ücretsiz bir kaynak bu prototipte bağlanmadı — bu nedenle toplam süreye dahil edilmedi. Yolculuktan önce güncel trafik durumunu kendi navigasyon uygulamanızdan kontrol edin.</div>
+  `;
+}
+
+function renderMolalarTab(trip) {
+  if (!trip.breaks.length) return '<div class="empty-state">Bu mesafe için otomatik mola önerilmedi. Aşağıdan kendi molanızı ekleyebilirsiniz.</div>' + addBreakButtonHTML();
+  const dep = new Date(trip.date + 'T' + trip.time);
+  let items = trip.breaks.map(b => {
+    const atTime = new Date(dep.getTime() + b.atDriveMinute * 60000);
+    return `<div class="break-item">
+      <div>
+        <div class="bi-title">${esc(b.title)}</div>
+        <div class="bi-meta">~${atTime.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })} civarı · ${b.durationMin} dk</div>
+      </div>
+      <div style="display:flex; align-items:center; gap:6px">
+        <select data-brk="${b.id}" class="brk-duration">
+          ${[10, 15, 20, 30, 45, 60].map(v => `<option value="${v}" ${v === b.durationMin ? 'selected' : ''}>${v} dk</option>`).join('')}
+        </select>
+        <button class="bi-remove" data-remove="${b.id}" title="Molayı sil">✕</button>
+      </div>
+    </div>`;
+  }).join('');
+  return items + addBreakButtonHTML();
+}
+function addBreakButtonHTML() {
+  return `<button class="secondary-btn" id="btn-add-break" style="width:100%; margin-top:6px">+ Özel Mola Ekle</button>`;
+}
+function bindMolaEvents(trip) {
+  document.querySelectorAll('.brk-duration').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const b = trip.breaks.find(x => x.id === sel.dataset.brk);
+      if (b) { b.durationMin = +sel.value; recalcTrip(trip); persistCurrentTrip(); renderTripDetail(trip); }
+    });
+  });
+  document.querySelectorAll('[data-remove]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      trip.breaks = trip.breaks.filter(x => x.id !== btn.dataset.remove);
+      recalcTrip(trip); persistCurrentTrip(); renderTripDetail(trip);
+      toast('Mola kaldırıldı, süre güncellendi.');
+    });
+  });
+  const addBtn = document.getElementById('btn-add-break');
+  if (addBtn) addBtn.addEventListener('click', () => {
+    const n = trip.breaks.length + 1;
+    trip.breaks.push({
+      id: 'brk_custom_' + Date.now(), order: n, title: 'Özel Mola', type: 'ozel',
+      durationMin: 15, atDriveMinute: trip.driveMinutes, routeFraction: 1,
+    });
+    recalcTrip(trip); persistCurrentTrip(); renderTripDetail(trip);
+  });
+}
+
+function renderProgramTab(trip) {
+  const dep = new Date(trip.date + 'T' + trip.time);
+  const rows = [{ time: dep, title: `${trip.start}'den hareket`, meta: 'Başlangıç' }];
+  let cum = 0;
+  trip.breaks.forEach(b => {
+    cum = b.atDriveMinute;
+    const t = new Date(dep.getTime() + cum * 60000);
+    rows.push({ time: t, title: b.title, meta: `${b.durationMin} dakika mola` });
+  });
+  const arrival = new Date(dep.getTime() + trip.totalMinutes * 60000);
+  rows.push({ time: arrival, title: `${trip.end}'e tahmini varış`, meta: 'Varış' });
+
+  return rows.map(r => `
+    <div class="schedule-row">
+      <div class="schedule-time">${r.time.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })}</div>
+      <div class="schedule-body">
+        <div class="sb-title">${esc(r.title)}</div>
+        <div class="sb-meta">${esc(r.meta)}</div>
+      </div>
+    </div>`).join('');
+}
+
+function persistCurrentTrip() {
+  const idx = state.trips.findIndex(t => t.id === state.currentTrip.id);
+  if (idx > -1) state.trips[idx] = state.currentTrip;
+  saveJSON(STORAGE_KEYS.trips, state.trips);
+}
+
+function deleteTrip(id) {
+  if (!confirm('Bu yolculuğu silmek istediğinize emin misiniz?')) return;
+  state.trips = state.trips.filter(t => t.id !== id);
+  saveJSON(STORAGE_KEYS.trips, state.trips);
+  toast('Yolculuk silindi.');
+  showView('home'); renderHome();
+}
+
+/* ---------------- HARİTA (Leaflet) ---------------- */
+function renderMapForTrip(trip, elementId) {
+  const container = document.getElementById(elementId);
+  if (!container || !trip.geometry) return;
+  container.innerHTML = '';
+  const map = L.map(elementId, { zoomControl: true, attributionControl: true });
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 18, attribution: '© OpenStreetMap katkıda bulunanları'
+  }).addTo(map);
+
+  const latlngs = trip.geometry.map(([lon, lat]) => [lat, lon]);
+  const line = L.polyline(latlngs, { color: '#ff8a4c', weight: 5, opacity: 0.9 }).addTo(map);
+  L.marker(latlngs[0]).addTo(map).bindPopup('Başlangıç: ' + esc(trip.start));
+  L.marker(latlngs[latlngs.length - 1]).addTo(map).bindPopup('Varış: ' + esc(trip.end));
+
+  trip.breaks.forEach(b => {
+    const pt = pointAtFraction(trip.geometry, b.routeFraction);
+    if (pt) {
+      L.circleMarker([pt.lat, pt.lon], { radius: 6, color: '#4fc3f7', fillColor: '#4fc3f7', fillOpacity: 1 })
+        .addTo(map).bindPopup(esc(b.title));
+    }
+  });
+
+  trip.addedPois.forEach(p => {
+    L.marker([p.lat, p.lon]).addTo(map).bindPopup(esc(p.name));
+  });
+
+  map.fitBounds(line.getBounds(), { padding: [24, 24] });
+  if (elementId === 'trip-map') state.map = map;
+}
+
+function renderStandaloneMap() {
+  const trip = state.currentTrip || state.trips[0];
+  const box = document.getElementById('standalone-map');
+  if (!trip) { box.innerHTML = '<div class="empty-state">Henüz görüntülenecek bir rota yok.</div>'; return; }
+  renderMapForTrip(trip, 'standalone-map');
+}
+
+/* ---------------- HAVA DURUMU (Open-Meteo) ---------------- */
+async function loadAndRenderWeather(trip) {
+  const c = document.getElementById('tab-content');
+  const dep = new Date(trip.date + 'T' + trip.time);
+  const points = [
+    { label: trip.start, coord: trip.startCoord, atMin: 0 },
+    { label: trip.end, coord: trip.endCoord, atMin: trip.totalMinutes },
+  ];
+  try {
+    const results = await Promise.all(points.map(p => fetchWeatherAt(p.coord, new Date(dep.getTime() + p.atMin * 60000))));
+    let html = '<div class="card">';
+    results.forEach((w, i) => {
+      const p = points[i];
+      if (!w) {
+        html += `<div class="weather-row"><span>${esc(p.label)}</span><span class="badge na">Veri yok</span></div>`;
+      } else {
+        html += `<div class="weather-row">
+          <span>${esc(p.label)} <span style="color:var(--text-faint); font-size:12px">(${new Date(dep.getTime() + p.atMin * 60000).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })})</span></span>
+          <span>${w.temp}°C · ${w.desc}</span>
+        </div>`;
+      }
+    });
+    html += '</div>';
+    html += '<p class="hint-text">Hava verileri Open-Meteo kaynağından alınmıştır ve tahminidir. Son güncelleme: ' + new Date().toLocaleTimeString('tr-TR') + '</p>';
+    c.innerHTML = html;
+  } catch (e) {
+    c.innerHTML = '<div class="error-box">Hava durumu verisi şu anda alınamadı. Lütfen daha sonra tekrar deneyin.</div>';
+  }
+}
+
+async function fetchWeatherAt(coord, targetDate) {
+  try {
+    const dateStr = targetDate.toISOString().slice(0, 10);
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${coord.lat}&longitude=${coord.lon}&hourly=temperature_2m,precipitation_probability,weathercode&start_date=${dateStr}&end_date=${dateStr}&timezone=Europe%2FIstanbul`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data.hourly || !data.hourly.time) return null;
+    const hour = targetDate.getHours();
+    const idx = data.hourly.time.findIndex(t => new Date(t).getHours() === hour);
+    const i = idx === -1 ? 0 : idx;
+    return {
+      temp: Math.round(data.hourly.temperature_2m[i]),
+      desc: weatherCodeToText(data.hourly.weathercode[i]),
+      precip: data.hourly.precipitation_probability ? data.hourly.precipitation_probability[i] : null,
+    };
+  } catch (e) { return null; }
+}
+function weatherCodeToText(code) {
+  const map = {
+    0: 'Açık', 1: 'Az bulutlu', 2: 'Parçalı bulutlu', 3: 'Kapalı',
+    45: 'Sisli', 48: 'Kırağı sisi', 51: 'Hafif çisenti', 61: 'Hafif yağmur',
+    63: 'Yağmurlu', 65: 'Kuvvetli yağmur', 71: 'Hafif kar', 73: 'Kar',
+    75: 'Yoğun kar', 80: 'Sağanak', 95: 'Fırtına',
+  };
+  return map[code] || 'Bilinmiyor';
+}
+
+/* ---------------- MEKÂN BULMA (Overpass API) ---------------- */
+async function loadAndRenderPois(trip) {
+  const c = document.getElementById('tab-content');
+  try {
+    const mid = pointAtFraction(trip.geometry, 0.5);
+    if (!mid) { c.innerHTML = '<div class="error-box">Rota üzerinde mekân aranacak nokta bulunamadı.</div>'; return; }
+    const pois = await fetchPoisNear(mid.lat, mid.lon, 15000);
+    if (!pois || !pois.length) {
+      c.innerHTML = '<div class="warning-box">Bu rota bölümü için doğrulanmış mekân verisi şu anda alınamadı. Farklı bir zamanda tekrar deneyin.</div>';
+      return;
+    }
+    c.innerHTML = `<p class="hint-text" style="margin-bottom:12px">Rotanın orta noktası civarında bulunan mekânlar (Overpass/OpenStreetMap verisi).</p>` +
+      pois.map(p => poiCardHTML(p, trip)).join('');
+    bindPoiEvents(trip, pois);
+  } catch (e) {
+    c.innerHTML = '<div class="error-box">Mekân verisi alınırken bir sorun oluştu.</div>';
+  }
+}
+
+async function fetchPoisNear(lat, lon, radiusM) {
+  const query = `
+    [out:json][timeout:20];
+    (
+      node["amenity"~"restaurant|cafe|fuel|fast_food"](around:${radiusM},${lat},${lon});
+    );
+    out center 12;`;
+  try {
+    const res = await fetch('https://overpass-api.de/api/interpreter', {
+      method: 'POST', body: query
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return (data.elements || []).slice(0, 8).map(el => ({
+      id: 'poi_' + el.id,
+      name: (el.tags && el.tags.name) || categoryLabel(el.tags && el.tags.amenity),
+      category: categoryLabel(el.tags && el.tags.amenity),
+      lat: el.lat, lon: el.lon,
+      openingHours: el.tags && el.tags['opening_hours'],
+    }));
+  } catch (e) { return null; }
+}
+function categoryLabel(amenity) {
+  const map = { restaurant: 'Restoran', cafe: 'Kahve Dükkânı', fuel: 'Akaryakıt İstasyonu', fast_food: 'Fast Food' };
+  return map[amenity] || 'Mekân';
+}
+
+function poiCardHTML(p, trip) {
+  const alreadyAdded = trip.addedPois.some(x => x.id === p.id);
+  const isFav = state.favorites.some(f => f.id === p.id);
+  return `<div class="poi-card">
+    <div class="poi-top">
+      <div>
+        <div class="poi-name">${esc(p.name)}</div>
+        <div class="poi-cat">${esc(p.category)}</div>
+      </div>
+      <span class="${p.openingHours ? 'status-unknown' : 'status-unknown'}">${p.openingHours ? esc(p.openingHours) : 'Saat bilgisi yok'}</span>
+    </div>
+    <div class="poi-actions">
+      <button data-add="${p.id}" ${alreadyAdded ? 'disabled' : ''}>${alreadyAdded ? 'Rotaya Eklendi ✓' : '+ Rotaya Ekle'}</button>
+      <button data-fav="${p.id}">${isFav ? '★ Favoride' : '☆ Favorilere Ekle'}</button>
+      <a href="https://www.google.com/maps/search/?api=1&query=${p.lat},${p.lon}" target="_blank" class="mini-btn" style="text-decoration:none; padding:7px 11px; font-size:12px">Haritada Gör</a>
+    </div>
+  </div>`;
+}
+
+function bindPoiEvents(trip, pois) {
+  document.querySelectorAll('[data-add]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const p = pois.find(x => x.id === btn.dataset.add);
+      if (!p) return;
+      trip.addedPois.push({ ...p, extraMinutes: 8, stayMinutes: 20 });
+      recalcTrip(trip); persistCurrentTrip();
+      toast(`${p.name} rotaya eklendi. Süre ve varış güncellendi.`);
+      renderTripDetail(trip);
+    });
+  });
+  document.querySelectorAll('[data-fav]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const p = pois.find(x => x.id === btn.dataset.fav);
+      if (!p) return;
+      if (!state.favorites.some(f => f.id === p.id)) {
+        state.favorites.push(p);
+        saveJSON(STORAGE_KEYS.favorites, state.favorites);
+        toast(`${p.name} favorilere eklendi.`);
+        renderTabContent(trip);
+      }
+    });
+  });
+}
+
+/* ---------------- NAVİGASYONA AKTARMA ---------------- */
+function openInGoogleMaps() {
+  const t = state.currentTrip; if (!t) return;
+  const waypoints = t.addedPois.map(p => `${p.lat},${p.lon}`).join('|');
+  let url = `https://www.google.com/maps/dir/?api=1&origin=${t.startCoord.lat},${t.startCoord.lon}&destination=${t.endCoord.lat},${t.endCoord.lon}`;
+  if (waypoints) url += `&waypoints=${encodeURIComponent(waypoints)}`;
+  window.open(url, '_blank');
+}
+function openInWaze() {
+  const t = state.currentTrip; if (!t) return;
+  window.open(`https://waze.com/ul?ll=${t.endCoord.lat},${t.endCoord.lon}&navigate=yes`, '_blank');
+}
+function exportTripJSON() {
+  const t = state.currentTrip; if (!t) return;
+  const blob = new Blob([JSON.stringify(t, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `yolculuk_${t.start}_${t.end}.json`.replace(/\s+/g, '_');
+  a.click();
+}
+
+/* ---------------- AYARLAR ---------------- */
+function fillSettingsForm() {
+  document.getElementById('s-name').value = state.settings.name || '';
+  document.getElementById('s-home').value = state.settings.home || '';
+  document.getElementById('s-fuel-price').value = state.settings.fuelPrice || 45;
+  document.getElementById('s-nav-app').value = state.settings.navApp || 'google';
+}
+document.getElementById('settings-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  state.settings = {
+    name: document.getElementById('s-name').value,
+    home: document.getElementById('s-home').value,
+    fuelPrice: +document.getElementById('s-fuel-price').value || 45,
+    navApp: document.getElementById('s-nav-app').value,
+  };
+  saveJSON(STORAGE_KEYS.settings, state.settings);
+  toast('Ayarlar kaydedildi.');
+});
+document.getElementById('btn-export').addEventListener('click', () => {
+  const blob = new Blob([JSON.stringify({ trips: state.trips, favorites: state.favorites, settings: state.settings }, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'rota_defteri_yedek.json';
+  a.click();
+});
+document.getElementById('btn-clear-data').addEventListener('click', () => {
+  if (!confirm('Tüm yolculuklar, favoriler ve ayarlar silinecek. Emin misiniz?')) return;
+  localStorage.clear();
+  state.trips = []; state.favorites = []; state.settings = { ...DEFAULT_SETTINGS };
+  toast('Tüm veriler temizlendi.');
+  showView('home'); renderHome();
+});
+
+/* ---------------- DEMO VERİSİ (ilk açılış) ---------------- */
+function ensureDemoTrip() {
+  if (state.trips.length > 0 || localStorage.getItem('rd_demo_dismissed')) return;
+  const demo = {
+    id: 'demo_trip',
+    isDemo: true,
+    start: 'İstanbul', end: 'Antalya',
+    startCoord: { lat: 41.0082, lon: 28.9784, label: 'İstanbul' },
+    endCoord: { lat: 36.8969, lon: 30.7133, label: 'Antalya' },
+    date: new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10),
+    time: '23:00',
+    passengers: 4, children: true,
+    breakIntervalMin: 120, breakDurationMin: 20,
+    fuelType: 'benzin', consumption: 7.5, fuelPrice: 45,
+    distanceKm: 720, driveMinutes: 8.5 * 60,
+    geometry: [[28.9784, 41.0082], [31.5, 39.5], [30.7133, 36.8969]].map(([lon, lat]) => [lon, lat]),
+    breaks: [], addedPois: [], status: 'planlandı', createdAt: Date.now(),
+  };
+  generateAutoBreaks(demo);
+  recalcTrip(demo);
+  state.trips.push(demo);
+}
+
+/* ---------------- SERVICE WORKER / PWA ---------------- */
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').catch(() => { /* offline destek olmadan devam et */ });
+  });
+}
+
+/* ---------------- BAŞLANGIÇ ---------------- */
+ensureDemoTrip();
+renderHome();
