@@ -216,6 +216,51 @@ button{font-family:inherit}
 }
 @keyframes toastin{from{opacity:0; transform:translateY(-8px)} to{opacity:1; transform:translateY(0)}}
 
+/* ---------------- YOLCULUK MODU ---------------- */
+body.drive-active .topbar,
+body.drive-active .bottom-nav{ display:none !important; }
+body.drive-active #app{ margin-left:0; max-width:none; padding:0; }
+.drive-view{ min-height:100vh; background:var(--bg); }
+.drive-wrap{ max-width:520px; margin:0 auto; padding:18px 16px 40px; }
+
+.drive-exit{
+  background:none; border:none; color:var(--text-faint); font-size:14px; padding:10px 0; cursor:pointer;
+}
+.drive-next-card{
+  background:linear-gradient(160deg, var(--card-2), var(--card));
+  border:1px solid var(--border); border-radius:var(--radius); padding:22px; text-align:center; margin-bottom:16px;
+}
+.drive-next-label{ color:var(--text-faint); font-size:13px; text-transform:uppercase; letter-spacing:.06em; margin-bottom:6px }
+.drive-next-title{ font-size:24px; font-weight:800; margin-bottom:14px }
+.drive-metrics{ display:grid; grid-template-columns:1fr 1fr; gap:12px }
+.drive-metric{ background:var(--bg-elev); border-radius:var(--radius-sm); padding:14px 10px }
+.drive-metric .val{ font-size:22px; font-weight:800; color:var(--accent) }
+.drive-metric .lbl{ font-size:11px; color:var(--text-faint); text-transform:uppercase; letter-spacing:.04em; margin-top:2px }
+
+.drive-alert{
+  border-radius:var(--radius-sm); padding:12px 14px; font-size:13.5px; margin-bottom:10px; line-height:1.5;
+  background:rgba(245,184,61,.1); border:1px solid rgba(245,184,61,.35); color:var(--warn);
+}
+.drive-alert.calm{ background:rgba(82,201,122,.1); border-color:rgba(82,201,122,.35); color:var(--good) }
+
+.drive-big-btn{
+  width:100%; padding:22px; margin-bottom:12px; border:none; border-radius:var(--radius);
+  font-size:19px; font-weight:800; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:10px;
+  background:var(--card); color:var(--text); border:1px solid var(--border);
+}
+.drive-big-btn.primary{
+  background:linear-gradient(135deg, var(--accent), #ff6a3d); color:#1a0e08; border:none;
+  box-shadow:0 10px 24px -10px rgba(255,138,76,.6);
+}
+.drive-big-btn.on-break{
+  background:linear-gradient(135deg, var(--good), #2fa860); color:#08140c; border:none;
+}
+.drive-row-2{ display:grid; grid-template-columns:1fr 1fr; gap:12px }
+.drive-row-2 .drive-big-btn{ font-size:15px; padding:18px 10px }
+
+.drive-emergency-list{ margin-top:6px }
+.drive-emergency-list .poi-card{ background:var(--bg-elev) }
+
 /* Leaflet marker icon tweaks */
 .leaflet-container{background:#0b1220}
 

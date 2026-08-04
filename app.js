@@ -190,9 +190,10 @@ document.getElementById('trip-form').addEventListener('submit', async (e) => {
     if (!startCoord) { toast('Başlangıç adresi bulunamadı. Farklı bir yazım deneyin.'); return; }
     if (!endCoord) { toast('Varış adresi bulunamadı. Farklı bir yazım deneyin.'); return; }
 
-    // 2) Route (OSRM)
-    const route = await fetchRoute(startCoord, endCoord);
-    if (!route) { toast('Rota hesaplanamadı. Rota servisi şu anda yanıt vermiyor olabilir.'); return; }
+    // 2) Route (OSRM) — alternatif rotalarla birlikte
+    const routeOptions = await fetchRoutes(startCoord, endCoord);
+    if (!routeOptions) { toast('Rota hesaplanamadı. Rota servisi şu anda yanıt vermiyor olabilir.'); return; }
+    const defaultRoute = routeOptions[0]; // fetchRoutes en hızlıyı ilk sıraya koyar
 
     const trip = {
       id: 'trip_' + Date.now(),
@@ -206,9 +207,11 @@ document.getElementById('trip-form').addEventListener('submit', async (e) => {
       fuelType: document.getElementById('f-fuel-type').value,
       consumption: +document.getElementById('f-consumption').value || 7,
       fuelPrice: +document.getElementById('f-fuel-price').value || state.settings.fuelPrice,
-      distanceKm: route.distanceKm,
-      driveMinutes: route.durationMin,
-      geometry: route.geometry,
+      routeOptions,
+      selectedRouteId: defaultRoute.id,
+      distanceKm: defaultRoute.distanceKm,
+      driveMinutes: defaultRoute.durationMin,
+      geometry: defaultRoute.geometry,
       breaks: [],
       addedPois: [],
       status: 'planlandı',
@@ -260,20 +263,46 @@ async function reverseGeocode(lat, lon) {
   } catch (e) { return null; }
 }
 
-/* ---------------- ROUTING (OSRM demo sunucusu) ---------------- */
-async function fetchRoute(start, end) {
+/* ---------------- ROUTING (OSRM demo sunucusu) — alternatif rotalar ---------------- */
+async function fetchRoutes(start, end) {
   try {
-    const url = `https://router.project-osrm.org/route/v1/driving/${start.lon},${start.lat};${end.lon},${end.lat}?overview=full&geometries=geojson`;
+    const url = `https://router.project-osrm.org/route/v1/driving/${start.lon},${start.lat};${end.lon},${end.lat}?overview=full&geometries=geojson&alternatives=true`;
     const res = await fetch(url);
     if (!res.ok) return null;
     const data = await res.json();
     if (!data.routes || !data.routes.length) return null;
-    const r = data.routes[0];
-    return {
+
+    const raw = data.routes.map((r, i) => ({
+      rawIndex: i,
       distanceKm: r.distance / 1000,
       durationMin: r.duration / 60,
-      geometry: r.geometry.coordinates, // [lon,lat] dizisi
-    };
+      geometry: r.geometry.coordinates,
+    }));
+
+    const fastestIdx = raw.reduce((best, r, i) => (r.durationMin < raw[best].durationMin ? i : best), 0);
+    const shortestIdx = raw.reduce((best, r, i) => (r.distanceKm < raw[best].distanceKm ? i : best), 0);
+
+    const options = raw.map((r, i) => {
+      let label;
+      if (i === fastestIdx && i === shortestIdx) label = 'En Hızlı ve En Kısa Rota';
+      else if (i === fastestIdx) label = 'En Hızlı Rota';
+      else if (i === shortestIdx) label = 'En Kısa Rota';
+      else label = 'Alternatif Rota';
+      return { id: 'route_' + i, label, distanceKm: r.distanceKm, durationMin: r.durationMin, geometry: r.geometry };
+    });
+
+    // Aynı etikette birden fazla rota varsa (nadiren), sıralı numaralandır
+    const labelCounts = {};
+    options.forEach(o => { labelCounts[o.label] = (labelCounts[o.label] || 0) + 1; });
+    const seen = {};
+    options.forEach(o => {
+      if (labelCounts[o.label] > 1) {
+        seen[o.label] = (seen[o.label] || 0) + 1;
+        if (seen[o.label] > 1) o.label += ` ${seen[o.label]}`;
+      }
+    });
+
+    return options;
   } catch (e) { return null; }
 }
 
@@ -309,7 +338,7 @@ function pointAtFraction(geometry, fraction) {
 
 /* ---------------- YENİDEN HESAPLAMA ---------------- */
 function recalcTrip(trip) {
-  const totalBreakMin = trip.breaks.reduce((s, b) => s + b.durationMin, 0);
+  const totalBreakMin = trip.breaks.filter(b => !b.skipped).reduce((s, b) => s + b.durationMin, 0);
   const addedPoiExtraMin = trip.addedPois.reduce((s, p) => s + (p.extraMinutes || 0) + (p.stayMinutes || 0), 0);
   const totalMin = trip.driveMinutes + totalBreakMin + addedPoiExtraMin;
 
@@ -370,6 +399,7 @@ function renderTripDetail(trip) {
 
     <div class="tabs">
       <button class="tab-btn" data-tab="ozet">Özet</button>
+      <button class="tab-btn" data-tab="rotalar">Rotalar</button>
       <button class="tab-btn" data-tab="molalar">Molalar</button>
       <button class="tab-btn" data-tab="mekanlar">Mekânlar</button>
       <button class="tab-btn" data-tab="hava">Hava Durumu</button>
@@ -378,6 +408,9 @@ function renderTripDetail(trip) {
 
     <div id="tab-content"></div>
 
+    <div class="nav-export-row">
+      <button class="drive-mode-cta" onclick="startDriveMode('${trip.id}')">🚗 Yolculuk Modunu Başlat</button>
+    </div>
     <div class="nav-export-row">
       <button onclick="openInGoogleMaps()">Google Maps'te Aç</button>
       <button onclick="openInWaze()">Waze'de Aç</button>
@@ -398,6 +431,7 @@ function renderTripDetail(trip) {
 function renderTabContent(trip) {
   const c = document.getElementById('tab-content');
   if (activeTabId === 'ozet') c.innerHTML = renderOzetTab(trip);
+  if (activeTabId === 'rotalar') c.innerHTML = renderRotalarTab(trip);
   if (activeTabId === 'molalar') { c.innerHTML = renderMolalarTab(trip); bindMolaEvents(trip); }
   if (activeTabId === 'mekanlar') { c.innerHTML = '<div class="empty-state">Mekânlar yükleniyor…</div>'; loadAndRenderPois(trip); }
   if (activeTabId === 'hava') { c.innerHTML = '<div class="empty-state">Hava durumu yükleniyor…</div>'; loadAndRenderWeather(trip); }
@@ -423,9 +457,9 @@ function renderMolalarTab(trip) {
   const dep = new Date(trip.date + 'T' + trip.time);
   let items = trip.breaks.map(b => {
     const atTime = new Date(dep.getTime() + b.atDriveMinute * 60000);
-    return `<div class="break-item">
+    return `<div class="break-item" style="${b.skipped ? 'opacity:.5' : ''}">
       <div>
-        <div class="bi-title">${esc(b.title)}</div>
+        <div class="bi-title">${esc(b.title)}${b.skipped ? ' (atlandı)' : ''}</div>
         <div class="bi-meta">~${atTime.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })} civarı · ${b.durationMin} dk</div>
       </div>
       <div style="display:flex; align-items:center; gap:6px">
@@ -486,6 +520,46 @@ function renderProgramTab(trip) {
         <div class="sb-meta">${esc(r.meta)}</div>
       </div>
     </div>`).join('');
+}
+
+function renderRotalarTab(trip) {
+  if (!trip.routeOptions || trip.routeOptions.length <= 1) {
+    return `<div class="warning-box">Bu güzergâh için OSRM servisi tek rota döndürdü, alternatif bulunamadı.</div>` + renderOzetTab(trip);
+  }
+  const cards = trip.routeOptions.map(opt => {
+    const isSelected = opt.id === trip.selectedRouteId;
+    const fuelAmount = trip.consumption ? (opt.distanceKm / 100) * trip.consumption : null;
+    const fuelCost = fuelAmount ? fuelAmount * (trip.fuelPrice || 45) : null;
+    return `<div class="card" style="${isSelected ? 'border-color:var(--accent)' : ''}">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px">
+        <div style="font-weight:700; font-size:16px">${esc(opt.label)}</div>
+        ${isSelected ? '<span class="badge live">Seçili</span>' : ''}
+      </div>
+      <div class="summary-row"><span class="lbl">Toplam kilometre</span><span class="val">${opt.distanceKm.toFixed(0)} km</span></div>
+      <div class="summary-row"><span class="lbl">Saf sürüş süresi</span><span class="val">${minutesToText(opt.durationMin)}</span></div>
+      <div class="summary-row"><span class="lbl">Tahmini yakıt maliyeti</span><span class="val">${fuelCost ? '₺' + fuelCost.toFixed(0) : '—'}</span></div>
+      ${!isSelected ? `<button class="secondary-btn" style="width:100%; margin-top:10px" onclick="selectRouteOption('${opt.id}')">Bu Rotayı Kullan</button>` : ''}
+    </div>`;
+  }).join('');
+
+  return cards + `<div class="warning-box">Ücretli yol/köprü/feribot geçiş ücretleri ve "manzaralı rota" ayrımı için bu prototipte bağlı bir veri kaynağı yok — rotalar yalnızca OSRM'in mesafe/süre hesabına göre etiketlendi. Bir rota değiştirildiğinde molalar otomatik olarak yeniden oluşturulur.</div>`;
+}
+
+function selectRouteOption(routeId) {
+  const trip = state.currentTrip;
+  const opt = trip.routeOptions.find(o => o.id === routeId);
+  if (!opt) return;
+  trip.selectedRouteId = opt.id;
+  trip.distanceKm = opt.distanceKm;
+  trip.driveMinutes = opt.durationMin;
+  trip.geometry = opt.geometry;
+  trip.addedPois = [];
+  generateAutoBreaks(trip);
+  recalcTrip(trip);
+  persistCurrentTrip();
+  toast('Rota değiştirildi. Molalar ve süre yeniden hesaplandı.');
+  activeTabId = 'ozet';
+  renderTripDetail(trip);
 }
 
 function persistCurrentTrip() {
@@ -617,11 +691,12 @@ async function loadAndRenderPois(trip) {
   }
 }
 
-async function fetchPoisNear(lat, lon, radiusM) {
+async function fetchPoisNear(lat, lon, radiusM, amenities) {
+  const list = (amenities && amenities.length) ? amenities : ['restaurant', 'cafe', 'fuel', 'fast_food'];
   const query = `
     [out:json][timeout:20];
     (
-      node["amenity"~"restaurant|cafe|fuel|fast_food"](around:${radiusM},${lat},${lon});
+      node["amenity"~"${list.join('|')}"](around:${radiusM},${lat},${lon});
     );
     out center 12;`;
   try {
@@ -640,7 +715,10 @@ async function fetchPoisNear(lat, lon, radiusM) {
   } catch (e) { return null; }
 }
 function categoryLabel(amenity) {
-  const map = { restaurant: 'Restoran', cafe: 'Kahve Dükkânı', fuel: 'Akaryakıt İstasyonu', fast_food: 'Fast Food' };
+  const map = {
+    restaurant: 'Restoran', cafe: 'Kahve Dükkânı', fuel: 'Akaryakıt İstasyonu', fast_food: 'Fast Food',
+    hospital: 'Hastane', pharmacy: 'Eczane', police: 'Polis',
+  };
   return map[amenity] || 'Mekân';
 }
 
@@ -707,6 +785,220 @@ function exportTripJSON() {
   a.href = URL.createObjectURL(blob);
   a.download = `yolculuk_${t.start}_${t.end}.json`.replace(/\s+/g, '_');
   a.click();
+}
+
+/* ---------------- YOLCULUK MODU (Aşama 8) ---------------- */
+let driveTimer = null;
+
+function startDriveMode(tripId) {
+  const trip = state.trips.find(t => t.id === tripId);
+  if (!trip) return;
+  state.currentTrip = trip;
+  if (!trip.driveState) {
+    trip.driveState = { startedAt: Date.now(), activeBreakId: null, activeBreakStartedAt: null };
+    persistCurrentTrip();
+  }
+  document.body.classList.add('drive-active');
+  showView('drive');
+  renderDriveMode();
+  if (driveTimer) clearInterval(driveTimer);
+  driveTimer = setInterval(renderDriveMode, 15000);
+}
+
+function exitDriveMode() {
+  if (driveTimer) { clearInterval(driveTimer); driveTimer = null; }
+  document.body.classList.remove('drive-active');
+  const trip = state.currentTrip;
+  showView('trip');
+  if (trip) renderTripDetail(trip);
+}
+
+function buildTimeline(trip) {
+  const events = [];
+  let cumMin = 0, driveSoFar = 0;
+  const activeBreaks = trip.breaks.filter(b => !b.skipped).sort((a, b) => a.atDriveMinute - b.atDriveMinute);
+  activeBreaks.forEach(b => {
+    cumMin += (b.atDriveMinute - driveSoFar);
+    events.push({ type: 'break', ref: b, title: b.title, offsetMin: cumMin, driveMinuteMark: b.atDriveMinute, fraction: b.routeFraction });
+    cumMin += b.durationMin;
+    driveSoFar = b.atDriveMinute;
+  });
+  cumMin += (trip.driveMinutes - driveSoFar);
+  events.push({ type: 'arrival', title: `${trip.end}'e varış`, offsetMin: cumMin, driveMinuteMark: trip.driveMinutes, fraction: 1 });
+  return events;
+}
+
+function getNextStopInfo(trip) {
+  const ds = trip.driveState;
+  const now = Date.now();
+  const elapsedMin = (now - ds.startedAt) / 60000;
+
+  if (ds.activeBreakId) {
+    const b = trip.breaks.find(x => x.id === ds.activeBreakId);
+    if (b) {
+      const breakElapsed = (now - ds.activeBreakStartedAt) / 60000;
+      const remaining = Math.max(0, b.durationMin - breakElapsed);
+      return { onBreak: true, title: b.title, remainingMin: remaining, fraction: b.routeFraction, breakRef: b };
+    }
+  }
+
+  const timeline = buildTimeline(trip);
+  const avgSpeed = trip.distanceKm / trip.driveMinutes; // km / dakika
+  let lastEvent = null;
+  for (const ev of timeline) { if (ev.offsetMin <= elapsedMin) lastEvent = ev; else break; }
+  const nextEvent = timeline.find(ev => ev.offsetMin > elapsedMin) || timeline[timeline.length - 1];
+
+  const driveDoneBase = lastEvent ? lastEvent.driveMinuteMark : 0;
+  const offsetBase = lastEvent ? lastEvent.offsetMin : 0;
+  const drivenSoFarPure = driveDoneBase + Math.max(0, elapsedMin - offsetBase);
+  const remainingDriveMin = Math.max(0, nextEvent.driveMinuteMark - drivenSoFarPure);
+
+  return {
+    onBreak: false,
+    title: nextEvent.title,
+    remainingMin: remainingDriveMin,
+    remainingKm: remainingDriveMin * avgSpeed,
+    fraction: nextEvent.fraction,
+    isArrival: nextEvent.type === 'arrival',
+    breakRef: nextEvent.ref || null,
+  };
+}
+
+function renderDriveMode() {
+  const trip = state.currentTrip;
+  if (!trip) return;
+  const info = getNextStopInfo(trip);
+  const c = document.getElementById('drive-content');
+
+  const metricsHTML = info.onBreak
+    ? `<div class="drive-metrics">
+        <div class="drive-metric"><div class="val">${Math.ceil(info.remainingMin)} dk</div><div class="lbl">Kalan mola</div></div>
+        <div class="drive-metric"><div class="val">${trip.arrivalText}</div><div class="lbl">Planlanan varış</div></div>
+      </div>`
+    : `<div class="drive-metrics">
+        <div class="drive-metric"><div class="val">${info.remainingKm ? info.remainingKm.toFixed(0) + ' km' : '—'}</div><div class="lbl">Kalan mesafe</div></div>
+        <div class="drive-metric"><div class="val">${minutesToText(info.remainingMin)}</div><div class="lbl">Kalan süre</div></div>
+      </div>`;
+
+  c.innerHTML = `
+    <div class="drive-wrap">
+      <button class="drive-exit" onclick="exitDriveMode()">← Yolculuk Modundan Çık</button>
+
+      <div class="drive-next-card">
+        <div class="drive-next-label">${info.onBreak ? 'Moladasınız' : (info.isArrival ? 'Son Durak' : 'Sonraki Durak')}</div>
+        <div class="drive-next-title">${esc(info.title)}</div>
+        ${metricsHTML}
+      </div>
+
+      <div id="drive-weather-alert" class="drive-alert calm">Hava durumu kontrol ediliyor…</div>
+      <div class="drive-alert">Bu prototipte canlı trafik / yol çalışması verisi bağlanmadı. Yol durumunu kendi navigasyon uygulamanızdan da kontrol edin.</div>
+
+      ${info.onBreak
+        ? `<button class="drive-big-btn on-break" onclick="endActiveBreak()">✅ Molayı Bitir</button>`
+        : `<button class="drive-big-btn primary" onclick="openDriveNavigation()">🧭 Navigasyonu Aç</button>
+           ${info.breakRef ? `<button class="drive-big-btn" onclick="startActiveBreak('${info.breakRef.id}')">☕ Mola Verildi</button>` : ''}
+           ${info.breakRef ? `<button class="drive-big-btn" onclick="skipUpcomingBreak('${info.breakRef.id}')">⏭ Durağı Atla</button>` : ''}`
+      }
+
+      <div class="drive-row-2">
+        <button class="drive-big-btn" onclick="driveFindNearby('fuel')">⛽ Yakıt İstasyonu</button>
+        <button class="drive-big-btn" onclick="driveFindNearby('rest')">🛑 Dinlenme Tesisi</button>
+      </div>
+      <button class="drive-big-btn" onclick="driveFindNearby('generic')">📍 Yeni Durak Bul</button>
+      <button class="drive-big-btn" onclick="driveFindNearby('emergency')" style="color:var(--bad)">🚨 Acil Yardım Noktalarını Göster</button>
+
+      <div id="drive-results" class="drive-emergency-list"></div>
+    </div>
+  `;
+
+  loadDriveWeatherAlert(trip, info);
+}
+
+async function loadDriveWeatherAlert(trip, info) {
+  const box = document.getElementById('drive-weather-alert');
+  if (!box) return;
+  try {
+    const pt = pointAtFraction(trip.geometry, info.fraction != null ? info.fraction : 1);
+    if (!pt) { box.remove(); return; }
+    const targetTime = new Date(Date.now() + info.remainingMin * 60000);
+    const w = await fetchWeatherAt(pt, targetTime);
+    if (!w) { box.textContent = 'Hava durumu şu anda alınamadı.'; return; }
+    const risky = /yağmur|kar|fırtına|sağanak|sis/i.test(w.desc);
+    box.className = 'drive-alert' + (risky ? '' : ' calm');
+    box.textContent = risky
+      ? `Sonraki durakta ${w.desc.toLowerCase()} bekleniyor, ${w.temp}°C. Sürüşe dikkat edin.`
+      : `Sonraki durak civarında hava uygun görünüyor: ${w.desc.toLowerCase()}, ${w.temp}°C.`;
+  } catch (e) {
+    box.textContent = 'Hava durumu şu anda alınamadı.';
+  }
+}
+
+function startActiveBreak(breakId) {
+  const trip = state.currentTrip;
+  trip.driveState.activeBreakId = breakId;
+  trip.driveState.activeBreakStartedAt = Date.now();
+  persistCurrentTrip();
+  renderDriveMode();
+}
+function endActiveBreak() {
+  const trip = state.currentTrip;
+  trip.driveState.activeBreakId = null;
+  trip.driveState.activeBreakStartedAt = null;
+  persistCurrentTrip();
+  toast('Molayı bitirdiniz, iyi yolculuklar.');
+  renderDriveMode();
+}
+function skipUpcomingBreak(breakId) {
+  const trip = state.currentTrip;
+  const b = trip.breaks.find(x => x.id === breakId);
+  if (b) b.skipped = true;
+  recalcTrip(trip);
+  persistCurrentTrip();
+  toast('Durak atlandı, süre güncellendi.');
+  renderDriveMode();
+}
+
+function openDriveNavigation() {
+  const trip = state.currentTrip;
+  const info = getNextStopInfo(trip);
+  const pt = pointAtFraction(trip.geometry, info.fraction != null ? info.fraction : 1);
+  const dest = pt || trip.endCoord;
+  window.open(`https://www.google.com/maps/dir/?api=1&destination=${dest.lat},${dest.lon}`, '_blank');
+}
+
+function driveFindNearby(kind) {
+  const results = document.getElementById('drive-results');
+  if (!navigator.geolocation) {
+    results.innerHTML = '<div class="warning-box">Bu tarayıcı konum özelliğini desteklemiyor.</div>';
+    return;
+  }
+  results.innerHTML = '<div class="empty-state">Konumunuz alınıyor…</div>';
+  navigator.geolocation.getCurrentPosition(async (pos) => {
+    const { latitude, longitude } = pos.coords;
+    let amenities, label;
+    if (kind === 'fuel') { amenities = ['fuel']; label = 'yakıt istasyonu'; }
+    else if (kind === 'rest') { amenities = ['restaurant', 'cafe', 'fast_food']; label = 'dinlenme / yeme-içme noktası'; }
+    else if (kind === 'emergency') { amenities = ['hospital', 'pharmacy', 'police']; label = 'acil yardım noktası'; }
+    else { amenities = ['restaurant', 'cafe', 'fuel', 'fast_food']; label = 'durak'; }
+
+    results.innerHTML = `<div class="empty-state">Yakındaki ${label} aranıyor…</div>`;
+    const pois = await fetchPoisNear(latitude, longitude, 20000, amenities);
+    if (!pois || !pois.length) {
+      results.innerHTML = `<div class="warning-box">Yakınınızda doğrulanmış ${label} verisi şu anda bulunamadı.</div>`;
+      return;
+    }
+    results.innerHTML = pois.slice(0, 5).map(p => `
+      <div class="poi-card">
+        <div class="poi-top">
+          <div><div class="poi-name">${esc(p.name)}</div><div class="poi-cat">${esc(p.category)}</div></div>
+        </div>
+        <div class="poi-actions">
+          <a href="https://www.google.com/maps/dir/?api=1&destination=${p.lat},${p.lon}" target="_blank" class="mini-btn primary" style="text-decoration:none">Yol Tarifi Al</a>
+        </div>
+      </div>`).join('');
+  }, () => {
+    results.innerHTML = '<div class="warning-box">Konum izni verilmedi. Yakındaki yerleri bulmak için konum erişimi gerekir.</div>';
+  });
 }
 
 /* ---------------- AYARLAR ---------------- */
