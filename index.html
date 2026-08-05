@@ -185,6 +185,9 @@
           <option value="esri">Esri Sokak Haritası</option>
         </select>
       </label>
+      <label>Foursquare API Anahtarı (puanlı mekân önerileri için)
+        <input type="text" id="s-foursquare-key" placeholder="fsq3... (opsiyonel)">
+      </label>
       <button type="submit" class="cta-btn">Ayarları Kaydet</button>
     </form>
 
@@ -197,6 +200,12 @@
     <p class="hint-text">
       Bu uygulama harita ve rota için OpenStreetMap tabanlı ücretsiz servisleri (OSRM, Nominatim, Overpass, Open-Meteo)
       kullanır. Yoğun kullanımda bu servisler geçici olarak yanıt vermeyebilir; uygulama bu durumda size açıkça bilgi verir.
+    </p>
+    <p class="hint-text">
+      Puanlı mekân önerileri için ücretsiz bir Foursquare API anahtarı ekleyebilirsiniz:
+      <a href="https://location.foursquare.com/developer/" target="_blank">location.foursquare.com/developer</a>
+      adresinden ücretsiz kayıt olup bir proje oluşturun, "Places API" anahtarınızı (fsq3 ile başlar) buraya yapıştırın.
+      Anahtar girilmezse mekânlar puansız, yalnızca OpenStreetMap verisiyle listelenir.
     </p>
   </section>
 
