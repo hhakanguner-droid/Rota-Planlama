@@ -698,8 +698,17 @@ function isChainName(name) {
 async function fetchFoursquarePois(lat, lon, apiKey) {
   try {
     const url = `https://api.foursquare.com/v3/places/search?ll=${lat},${lon}&radius=15000&categories=13000&sort=RATING&limit=20&fields=name,rating,location,categories,geocodes,tel,website&locale=tr`;
-    const res = await fetch(url, { headers: { Authorization: apiKey, Accept: 'application/json' } });
-    if (!res.ok) return { error: res.status };
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        Accept: 'application/json',
+      }
+    });
+    if (!res.ok) {
+      let detail = '';
+      try { detail = (await res.text()).slice(0, 200); } catch (e2) { /* yoksay */ }
+      return { error: res.status, detail };
+    }
     const data = await res.json();
     const items = (data.results || [])
       .filter(r => !isChainName(r.name))
@@ -743,7 +752,7 @@ async function loadAndRenderPois(trip) {
         return;
       }
       if (result.error) {
-        c.innerHTML = `<div class="warning-box">Foursquare'den mekân verisi alınamadı (anahtar geçersiz olabilir). OpenStreetMap verisine geçiliyor…</div>`;
+        c.innerHTML = `<div class="warning-box">Foursquare'den mekân verisi alınamadı (HTTP ${esc(String(result.error))}${result.detail ? ': ' + esc(result.detail) : ''}). OpenStreetMap verisine geçiliyor…</div>`;
       } else {
         c.innerHTML = `<div class="warning-box">Foursquare bu bölge için sonuç döndürmedi. OpenStreetMap verisine geçiliyor…</div>`;
       }
