@@ -11,7 +11,7 @@ const STORAGE_KEYS = {
 };
 
 const DEFAULT_SETTINGS = {
-  name: '', home: '', fuelPrice: 45, navApp: 'google', mapProvider: 'carto_voyager', foursquareApiKey: ''
+  name: '', home: '', fuelPrice: 45, navApp: 'google', mapProvider: 'carto_voyager'
 };
 
 const TILE_PROVIDERS = {
@@ -688,59 +688,11 @@ function weatherCodeToText(code) {
   return map[code] || 'Bilinmiyor';
 }
 
-/* ---------------- MEKÂN BULMA (Foursquare — puanlı, yoksa Overpass) ---------------- */
+/* ---------------- MEKÂN BULMA (OpenStreetMap / Overpass — sade ve güvenilir) ---------------- */
 const CHAIN_BLOCKLIST = ['burger king', 'mcdonald', 'kfc', "domino's", 'dominos', 'pizza hut', 'subway sandwiches', 'popeyes'];
 function isChainName(name) {
   const n = (name || '').toLowerCase();
   return CHAIN_BLOCKLIST.some(c => n.includes(c));
-}
-
-async function fetchFoursquarePois(lat, lon, apiKey) {
-  try {
-    const params = new URLSearchParams({
-      ll: `${lat},${lon}`,
-      radius: '15000',
-      fsq_category_ids: '13000',
-      exclude_all_chains: 'true',
-      sort: 'RATING',
-      limit: '20',
-      fields: 'fsq_place_id,name,rating,location,categories,geocodes,tel,website',
-    });
-    const url = `https://places-api.foursquare.com/places/search?${params.toString()}`;
-    const res = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        Accept: 'application/json',
-        'X-Places-Api-Version': '2025-06-17',
-      }
-    });
-    if (!res.ok) {
-      let detail = '';
-      try { detail = (await res.text()).slice(0, 200); } catch (e2) { /* yoksay */ }
-      return { error: res.status, detail };
-    }
-    const data = await res.json();
-    const items = (data.results || [])
-      .filter(r => !isChainName(r.name))
-      .map(r => {
-        const geo = r.geocodes && (r.geocodes.main || r.geocodes.roof);
-        const catName = (r.categories && r.categories[0] && r.categories[0].name) || 'Mekân';
-        return {
-          id: 'fsq_' + (r.fsq_place_id || r.name),
-          name: r.name,
-          category: catName,
-          rating: typeof r.rating === 'number' ? r.rating : null,
-          lat: geo ? geo.latitude : null,
-          lon: geo ? geo.longitude : null,
-          locality: (r.location && (r.location.locality || r.location.region)) || '',
-          region: (r.location && r.location.region) || '',
-          openingHours: null,
-        };
-      })
-      .filter(p => p.lat && p.lon)
-      .sort((a, b) => (b.rating || 0) - (a.rating || 0));
-    return { items };
-  } catch (e) { return { error: 'network' }; }
 }
 
 async function loadAndRenderPois(trip) {
@@ -751,37 +703,20 @@ async function loadAndRenderPois(trip) {
 
     const relevantBreak = trip.breaks.find(b => !b.skipped) || null;
     const relevantDuration = relevantBreak ? relevantBreak.durationMin : trip.breakDurationMin;
-    const apiKey = state.settings.foursquareApiKey;
 
-    if (apiKey) {
-      const result = await fetchFoursquarePois(mid.lat, mid.lon, apiKey);
-      if (result.items && result.items.length) {
-        c.innerHTML = `<p class="hint-text" style="margin-bottom:12px">Rotanın orta noktası civarında, puanına göre sıralanmış dinlenme tesisleri (Foursquare verisi) — ${relevantDuration} dakikalık molanıza göre işaretlendi.</p>` +
-          result.items.slice(0, 8).map(p => poiCardHTML(p, trip, relevantDuration)).join('');
-        bindPoiEvents(trip, result.items);
-        return;
-      }
-      if (result.error) {
-        c.innerHTML = `<div class="warning-box">Foursquare'den mekân verisi alınamadı (HTTP ${esc(String(result.error))}${result.detail ? ': ' + esc(result.detail) : ''}). OpenStreetMap verisine geçiliyor…</div>`;
-      } else {
-        c.innerHTML = `<div class="warning-box">Foursquare bu bölge için sonuç döndürmedi. OpenStreetMap verisine geçiliyor…</div>`;
-      }
-      await sleep(600);
-    } else {
-      c.innerHTML = `<div class="warning-box">Puana göre sıralanmış öneriler için Ayarlar'dan ücretsiz bir Foursquare API anahtarı ekleyebilirsiniz. Şimdilik OpenStreetMap verisiyle devam ediliyor.</div>`;
-      await sleep(400);
-    }
-
-    // Yedek kaynak: Overpass / OpenStreetMap (puansız)
     const pois = await fetchPoisNear(mid.lat, mid.lon, 15000);
     if (!pois || !pois.length) {
-      c.innerHTML += '<div class="warning-box">Bu rota bölümü için doğrulanmış mekân verisi şu anda alınamadı. Farklı bir zamanda tekrar deneyin.</div>';
+      c.innerHTML = '<div class="warning-box">Bu rota bölümü için doğrulanmış mekân verisi şu anda alınamadı. Farklı bir zamanda tekrar deneyin.</div>';
       return;
     }
-    c.innerHTML += pois.map(p => poiCardHTML(p, trip, relevantDuration)).join('');
-    bindPoiEvents(trip, pois);
+    const filtered = pois.filter(p => !isChainName(p.name));
+    const finalList = filtered.length ? filtered : pois; // filtre her şeyi elerse yine de bir şey göster
 
-    for (const p of pois) {
+    c.innerHTML = `<p class="hint-text" style="margin-bottom:12px">Rotanın orta noktası civarında bulunan mekânlar, ${relevantDuration} dakikalık molanıza göre işaretlendi.</p>` +
+      finalList.map(p => poiCardHTML(p, trip, relevantDuration)).join('');
+    bindPoiEvents(trip, finalList);
+
+    for (const p of finalList) {
       const loc = await reverseGeocodeLocality(p.lat, p.lon);
       const el = document.querySelector(`[data-loc-for="${p.id}"]`);
       if (el) el.textContent = loc || 'Konum bilgisi bulunamadı';
@@ -1270,7 +1205,6 @@ function fillSettingsForm() {
   document.getElementById('s-fuel-price').value = state.settings.fuelPrice || 45;
   document.getElementById('s-nav-app').value = state.settings.navApp || 'google';
   document.getElementById('s-map-provider').value = state.settings.mapProvider || 'carto_voyager';
-  document.getElementById('s-foursquare-key').value = state.settings.foursquareApiKey || '';
 }
 document.getElementById('settings-form').addEventListener('submit', (e) => {
   e.preventDefault();
@@ -1280,7 +1214,6 @@ document.getElementById('settings-form').addEventListener('submit', (e) => {
     fuelPrice: +document.getElementById('s-fuel-price').value || 45,
     navApp: document.getElementById('s-nav-app').value,
     mapProvider: document.getElementById('s-map-provider').value,
-    foursquareApiKey: document.getElementById('s-foursquare-key').value.trim(),
   };
   saveJSON(STORAGE_KEYS.settings, state.settings);
   toast('Ayarlar kaydedildi.');
