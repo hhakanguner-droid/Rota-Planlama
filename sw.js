@@ -4,7 +4,7 @@
    ancak kayıtlı yolculuklar localStorage'da tutulduğu için
    çevrimdışıyken de görüntülenebilir. */
 
-const CACHE_NAME = 'rota-defteri-v2';
+const CACHE_NAME = 'rota-defteri-v3';
 const SHELL_FILES = [
   './',
   './index.html',
