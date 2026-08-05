@@ -1281,30 +1281,6 @@ document.getElementById('btn-clear-data').addEventListener('click', () => {
   showView('home'); renderHome();
 });
 
-/* ---------------- DEMO VERİSİ (ilk açılış) ---------------- */
-function ensureDemoTrip() {
-  if (state.trips.length > 0 || localStorage.getItem('rd_demo_dismissed')) return;
-  const demo = {
-    id: 'demo_trip',
-    isDemo: true,
-    start: 'İstanbul', end: 'Antalya',
-    startCoord: { lat: 41.0082, lon: 28.9784, label: 'İstanbul' },
-    endCoord: { lat: 36.8969, lon: 30.7133, label: 'Antalya' },
-    date: new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10),
-    time: '23:00',
-    passengers: 4, children: true,
-    breakIntervalMin: 120, breakDurationMin: 20,
-    fuelType: 'benzin', consumption: 7.5, fuelPrice: 45,
-    distanceKm: 720, driveMinutes: 8.5 * 60,
-    geometry: [[28.9784, 41.0082], [31.5, 39.5], [30.7133, 36.8969]].map(([lon, lat]) => [lon, lat]),
-    hasFerry: false, ferryNames: [], tollInfo: null, manualExpenses: [],
-    breaks: [], addedPois: [], status: 'planlandı', createdAt: Date.now(),
-  };
-  generateAutoBreaks(demo);
-  recalcTrip(demo);
-  state.trips.push(demo);
-}
-
 /* ---------------- SERVICE WORKER / PWA ---------------- */
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
@@ -1313,5 +1289,9 @@ if ('serviceWorker' in navigator) {
 }
 
 /* ---------------- BAŞLANGIÇ ---------------- */
-ensureDemoTrip();
+// Daha önceki bir sürümden kalmış olabilecek demo yolculuğu temizle
+if (state.trips.some(t => t.isDemo || t.id === 'demo_trip')) {
+  state.trips = state.trips.filter(t => !t.isDemo && t.id !== 'demo_trip');
+  saveJSON(STORAGE_KEYS.trips, state.trips);
+}
 renderHome();
