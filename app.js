@@ -697,11 +697,21 @@ function isChainName(name) {
 
 async function fetchFoursquarePois(lat, lon, apiKey) {
   try {
-    const url = `https://api.foursquare.com/v3/places/search?ll=${lat},${lon}&radius=15000&categories=13000&sort=RATING&limit=20&fields=name,rating,location,categories,geocodes,tel,website&locale=tr`;
+    const params = new URLSearchParams({
+      ll: `${lat},${lon}`,
+      radius: '15000',
+      fsq_category_ids: '13000',
+      exclude_all_chains: 'true',
+      sort: 'RATING',
+      limit: '20',
+      fields: 'fsq_place_id,name,rating,location,categories,geocodes,tel,website',
+    });
+    const url = `https://places-api.foursquare.com/places/search?${params.toString()}`;
     const res = await fetch(url, {
       headers: {
         Authorization: `Bearer ${apiKey}`,
         Accept: 'application/json',
+        'X-Places-Api-Version': '2025-06-17',
       }
     });
     if (!res.ok) {
@@ -716,7 +726,7 @@ async function fetchFoursquarePois(lat, lon, apiKey) {
         const geo = r.geocodes && (r.geocodes.main || r.geocodes.roof);
         const catName = (r.categories && r.categories[0] && r.categories[0].name) || 'Mekân';
         return {
-          id: 'fsq_' + (r.fsq_id || r.name),
+          id: 'fsq_' + (r.fsq_place_id || r.name),
           name: r.name,
           category: catName,
           rating: typeof r.rating === 'number' ? r.rating : null,
