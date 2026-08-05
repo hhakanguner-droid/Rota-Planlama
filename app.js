@@ -239,6 +239,10 @@ document.getElementById('trip-form').addEventListener('submit', async (e) => {
       distanceKm: defaultRoute.distanceKm,
       driveMinutes: defaultRoute.durationMin,
       geometry: defaultRoute.geometry,
+      hasFerry: defaultRoute.hasFerry,
+      ferryNames: defaultRoute.ferryNames,
+      tollInfo: null,
+      manualExpenses: [],
       breaks: [],
       addedPois: [],
       status: 'planlandı',
@@ -293,18 +297,26 @@ async function reverseGeocode(lat, lon) {
 /* ---------------- ROUTING (OSRM demo sunucusu) — alternatif rotalar ---------------- */
 async function fetchRoutes(start, end) {
   try {
-    const url = `https://router.project-osrm.org/route/v1/driving/${start.lon},${start.lat};${end.lon},${end.lat}?overview=full&geometries=geojson&alternatives=true`;
+    const url = `https://router.project-osrm.org/route/v1/driving/${start.lon},${start.lat};${end.lon},${end.lat}?overview=full&geometries=geojson&alternatives=true&steps=true`;
     const res = await fetch(url);
     if (!res.ok) return null;
     const data = await res.json();
     if (!data.routes || !data.routes.length) return null;
 
-    const raw = data.routes.map((r, i) => ({
-      rawIndex: i,
-      distanceKm: r.distance / 1000,
-      durationMin: r.duration / 60,
-      geometry: r.geometry.coordinates,
-    }));
+    const raw = data.routes.map((r, i) => {
+      const ferrySteps = [];
+      (r.legs || []).forEach(leg => (leg.steps || []).forEach(step => {
+        if (step.mode === 'ferry') ferrySteps.push(step.name || 'İsimsiz feribot hattı');
+      }));
+      return {
+        rawIndex: i,
+        distanceKm: r.distance / 1000,
+        durationMin: r.duration / 60,
+        geometry: r.geometry.coordinates,
+        hasFerry: ferrySteps.length > 0,
+        ferryNames: [...new Set(ferrySteps)],
+      };
+    });
 
     const fastestIdx = raw.reduce((best, r, i) => (r.durationMin < raw[best].durationMin ? i : best), 0);
     const shortestIdx = raw.reduce((best, r, i) => (r.distanceKm < raw[best].distanceKm ? i : best), 0);
@@ -315,7 +327,7 @@ async function fetchRoutes(start, end) {
       else if (i === fastestIdx) label = 'En Hızlı Rota';
       else if (i === shortestIdx) label = 'En Kısa Rota';
       else label = 'Alternatif Rota';
-      return { id: 'route_' + i, label, distanceKm: r.distanceKm, durationMin: r.durationMin, geometry: r.geometry };
+      return { id: 'route_' + i, label, distanceKm: r.distanceKm, durationMin: r.durationMin, geometry: r.geometry, hasFerry: r.hasFerry, ferryNames: r.ferryNames };
     });
 
     // Aynı etikette birden fazla rota varsa (nadiren), sıralı numaralandır
@@ -429,6 +441,7 @@ function renderTripDetail(trip) {
       <button class="tab-btn" data-tab="rotalar">Rotalar</button>
       <button class="tab-btn" data-tab="molalar">Molalar</button>
       <button class="tab-btn" data-tab="mekanlar">Mekânlar</button>
+      <button class="tab-btn" data-tab="maliyet">Maliyet</button>
       <button class="tab-btn" data-tab="program">Program</button>
     </div>
 
@@ -460,6 +473,7 @@ function renderTabContent(trip) {
   if (activeTabId === 'rotalar') c.innerHTML = renderRotalarTab(trip);
   if (activeTabId === 'molalar') { c.innerHTML = renderMolalarTab(trip); bindMolaEvents(trip); }
   if (activeTabId === 'mekanlar') { c.innerHTML = '<div class="empty-state">Mekânlar yükleniyor…</div>'; loadAndRenderPois(trip); }
+  if (activeTabId === 'maliyet') { loadAndRenderMaliyet(trip).then(() => bindMaliyetEvents(trip)); }
   if (activeTabId === 'program') c.innerHTML = renderProgramTab(trip);
 }
 
@@ -578,6 +592,9 @@ function selectRouteOption(routeId) {
   trip.distanceKm = opt.distanceKm;
   trip.driveMinutes = opt.durationMin;
   trip.geometry = opt.geometry;
+  trip.hasFerry = opt.hasFerry;
+  trip.ferryNames = opt.ferryNames;
+  trip.tollInfo = null; // rota değişti, geçiş verisi tekrar tespit edilecek
   trip.addedPois = [];
   generateAutoBreaks(trip);
   recalcTrip(trip);
@@ -1111,6 +1128,122 @@ function driveFindNearby(kind) {
   });
 }
 
+/* ---------------- ÜCRETLİ YOL / KÖPRÜ TESPİTİ (Overpass) ---------------- */
+async function detectTollSegments(trip) {
+  const geo = trip.geometry;
+  if (!geo || geo.length < 2) return [];
+  // Rota boyunca ~6-8 örnekleme noktası seç
+  const sampleCount = Math.min(8, Math.max(4, Math.round(trip.distanceKm / 100)));
+  const points = [];
+  for (let i = 0; i <= sampleCount; i++) {
+    const pt = pointAtFraction(geo, i / sampleCount);
+    if (pt) points.push(pt);
+  }
+  const clauses = points.map(p => `way["toll"="yes"](around:3000,${p.lat},${p.lon});`).join('\n');
+  const query = `[out:json][timeout:25];(${clauses});out tags 30;`;
+  try {
+    const res = await fetch('https://overpass-api.de/api/interpreter', { method: 'POST', body: query });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const names = (data.elements || [])
+      .map(el => (el.tags && (el.tags.name || el.tags.ref)) || null)
+      .filter(Boolean);
+    return [...new Set(names)];
+  } catch (e) { return null; }
+}
+
+async function loadAndRenderMaliyet(trip) {
+  const c = document.getElementById('tab-content');
+  trip.manualExpenses = trip.manualExpenses || [];
+  c.innerHTML = renderMaliyetTab(trip, true);
+  if (!trip.tollInfo) {
+    const segments = await detectTollSegments(trip);
+    trip.tollInfo = segments === null ? { error: true, segments: [] } : { error: false, segments };
+    persistCurrentTrip();
+  }
+  if (activeTabId === 'maliyet') c.innerHTML = renderMaliyetTab(trip, false);
+}
+
+function renderMaliyetTab(trip, tollLoading) {
+  const fuelCost = trip.fuelCost || 0;
+  const expensesTotal = (trip.manualExpenses || []).reduce((s, e) => s + e.amount, 0);
+  const grandTotal = fuelCost + expensesTotal;
+
+  let tollHTML;
+  if (tollLoading) {
+    tollHTML = '<div class="empty-state">Ücretli yol/köprü verisi kontrol ediliyor…</div>';
+  } else if (trip.tollInfo.error) {
+    tollHTML = '<div class="warning-box">Ücretli yol verisi şu anda alınamadı (OpenStreetMap/Overpass servisi yanıt vermedi).</div>';
+  } else if (trip.tollInfo.segments.length === 0) {
+    tollHTML = '<div class="hint-text">Bu rota üzerinde OpenStreetMap verisine göre işaretli ücretli yol/köprü bulunamadı. Bu, güzergâhta ücretli geçiş olmadığı anlamına gelmeyebilir — veri eksik olabilir.</div>';
+  } else {
+    tollHTML = `<div class="hint-text" style="margin-bottom:8px">Rotanızda şu ücretli yol/köprüler tespit edildi:</div>` +
+      trip.tollInfo.segments.map(s => `<div class="summary-row"><span class="val">${esc(s)}</span></div>`).join('');
+  }
+
+  const ferryHTML = trip.hasFerry
+    ? `<div class="warning-box">Bu rota feribot geçişi içeriyor: ${esc(trip.ferryNames.join(', ') || 'isimsiz hat')}. Güncel tarife ve sefer saatleri için feribot işletmecisinin kendi kaynağından kontrol edin.</div>`
+    : '';
+
+  return `
+    <div class="card">
+      <div class="summary-row"><span class="lbl">Tahmini yakıt maliyeti</span><span class="val">${fuelCost ? '₺' + fuelCost.toFixed(0) : '—'}</span></div>
+      <div class="summary-row"><span class="lbl">Ek giderler toplamı</span><span class="val">₺${expensesTotal.toFixed(0)}</span></div>
+      <div class="summary-row"><span class="lbl" style="font-weight:700">Toplam tahmini bütçe</span><span class="val" style="font-weight:700; color:var(--accent)">₺${grandTotal.toFixed(0)}</span></div>
+    </div>
+
+    <div class="warning-box">
+      Geçiş ücreti (köprü/otoyol) ve feribot fiyatları için bu prototipte bağlı, güncel bir ücret kaynağı yok — bu prototip yalnızca OpenStreetMap verisine bakarak ücretli yol/köprü <em>varlığını</em> tespit ediyor, tutar üretmiyor. Güncel tarife için
+      <a href="https://www.kgm.gov.tr" target="_blank">kgm.gov.tr</a> geçiş ücretleri sayfasını kontrol edin.
+    </div>
+
+    <div class="section-title" style="margin-top:20px">Ücretli Yol / Köprü</div>
+    ${tollHTML}
+
+    ${ferryHTML}
+
+    <div class="section-title" style="margin-top:20px">Diğer Giderler (otopark, yemek, konaklama vb.)</div>
+    <div id="expense-list">
+      ${(trip.manualExpenses || []).map(e => `
+        <div class="break-item">
+          <div>
+            <div class="bi-title">${esc(e.label)}</div>
+            <div class="bi-meta">₺${e.amount.toFixed(0)}</div>
+          </div>
+          <button class="bi-remove" data-remove-expense="${e.id}" title="Sil">✕</button>
+        </div>`).join('') || '<div class="empty-state">Henüz ek gider eklenmedi.</div>'}
+    </div>
+    <form id="expense-form" class="form" style="margin-top:10px">
+      <div class="grid-2">
+        <input type="text" id="exp-label" placeholder="Örn. Otopark" required>
+        <input type="number" id="exp-amount" placeholder="₺ Tutar" min="0" step="1" required>
+      </div>
+      <button type="submit" class="secondary-btn" style="width:100%">+ Gider Ekle</button>
+    </form>
+  `;
+}
+
+function bindMaliyetEvents(trip) {
+  document.querySelectorAll('[data-remove-expense]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      trip.manualExpenses = trip.manualExpenses.filter(e => e.id !== btn.dataset.removeExpense);
+      persistCurrentTrip();
+      renderTabContent(trip);
+    });
+  });
+  const form = document.getElementById('expense-form');
+  if (form) form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const label = document.getElementById('exp-label').value.trim();
+    const amount = +document.getElementById('exp-amount').value;
+    if (!label || !amount) return;
+    trip.manualExpenses = trip.manualExpenses || [];
+    trip.manualExpenses.push({ id: 'exp_' + Date.now(), label, amount });
+    persistCurrentTrip();
+    renderTabContent(trip);
+  });
+}
+
 /* ---------------- AYARLAR ---------------- */
 function fillSettingsForm() {
   document.getElementById('s-name').value = state.settings.name || '';
@@ -1164,6 +1297,7 @@ function ensureDemoTrip() {
     fuelType: 'benzin', consumption: 7.5, fuelPrice: 45,
     distanceKm: 720, driveMinutes: 8.5 * 60,
     geometry: [[28.9784, 41.0082], [31.5, 39.5], [30.7133, 36.8969]].map(([lon, lat]) => [lon, lat]),
+    hasFerry: false, ferryNames: [], tollInfo: null, manualExpenses: [],
     breaks: [], addedPois: [], status: 'planlandı', createdAt: Date.now(),
   };
   generateAutoBreaks(demo);
