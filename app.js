@@ -701,7 +701,7 @@ async function fetchPoisAlongRoute(trip) {
   if (!geo || geo.length < 2) return null;
 
   // Mola sayısından bağımsız: rotanın tamamına sabit aralıklarla yayılmış örnekleme noktaları
-  const sampleCount = Math.min(10, Math.max(5, Math.round(trip.distanceKm / 80)));
+  const sampleCount = Math.min(14, Math.max(6, Math.round(trip.distanceKm / 50)));
   const fractions = [];
   for (let i = 1; i < sampleCount; i++) fractions.push(i / sampleCount);
 
@@ -750,12 +750,21 @@ async function fetchPoisAlongRoute(trip) {
     const balanced = [];
     raw.forEach(p => {
       perCenterCount[p.centerIdx] = perCenterCount[p.centerIdx] || 0;
-      if (perCenterCount[p.centerIdx] < 2) {
+      if (perCenterCount[p.centerIdx] < 1) {
         perCenterCount[p.centerIdx]++;
         balanced.push(p);
       }
     });
-    return balanced;
+
+    // Ek güvenlik: farklı örnekleme noktalarından gelse bile birbirine ~20km'den
+    // yakın sonuçları tek kümede say, aynı bölgeye yığılmayı önle (küme başına 1 sonuç)
+    const geoClusters = [];
+    const spread = [];
+    balanced.forEach(p => {
+      const alreadyCovered = geoClusters.some(c => Math.hypot(c.lat - p.lat, c.lon - p.lon) < 0.2);
+      if (!alreadyCovered) { geoClusters.push({ lat: p.lat, lon: p.lon }); spread.push(p); }
+    });
+    return spread;
   } catch (e) { return null; }
 }
 
@@ -1326,6 +1335,11 @@ if ('serviceWorker' in navigator) {
 // Daha önceki bir sürümden kalmış olabilecek demo yolculuğu temizle
 if (state.trips.some(t => t.isDemo || t.id === 'demo_trip')) {
   state.trips = state.trips.filter(t => !t.isDemo && t.id !== 'demo_trip');
+  saveJSON(STORAGE_KEYS.trips, state.trips);
+}
+// Mekân arama algoritması değişti — eski önbelleğe alınmış mekân listelerini temizle
+if (state.trips.some(t => t.cachedPois)) {
+  state.trips.forEach(t => { t.cachedPois = null; });
   saveJSON(STORAGE_KEYS.trips, state.trips);
 }
 renderHome();
