@@ -702,13 +702,12 @@ async function fetchPoisAlongRoute(trip) {
 
   // Mola sayısından bağımsız: rotanın tamamına sabit aralıklarla yayılmış örnekleme noktaları
   const sampleCount = Math.min(10, Math.max(5, Math.round(trip.distanceKm / 80)));
-  const points = [];
-  for (let i = 1; i < sampleCount; i++) points.push(i / sampleCount);
+  const fractions = [];
+  for (let i = 1; i < sampleCount; i++) fractions.push(i / sampleCount);
 
-  const centers = points.map(f => pointAtFraction(geo, f)).filter(Boolean);
+  const centers = fractions.map(f => pointAtFraction(geo, f)).filter(Boolean);
   if (!centers.length) return null;
 
-  // Sadece gerçek "dinlenme tesisi" (otoyol/anayol servis alanları) + akaryakıt istasyonları
   const clauses = centers.map(c => `
     node["highway"="services"](around:3000,${c.lat},${c.lon});
     way["highway"="services"](around:3000,${c.lat},${c.lon});
@@ -720,7 +719,7 @@ async function fetchPoisAlongRoute(trip) {
     if (!res.ok) return null;
     const data = await res.json();
     const seen = new Set();
-    const items = [];
+    const raw = [];
     (data.elements || []).forEach(el => {
       if (seen.has(el.id)) return;
       seen.add(el.id);
@@ -728,7 +727,7 @@ async function fetchPoisAlongRoute(trip) {
       const lon = el.lon || (el.center && el.center.lon);
       if (!lat || !lon) return;
       const isServices = el.tags && el.tags.highway === 'services';
-      items.push({
+      raw.push({
         id: 'poi_' + el.id,
         name: (el.tags && el.tags.name) || (isServices ? 'Dinlenme Tesisi' : 'Akaryakıt İstasyonu'),
         category: isServices ? 'Dinlenme Tesisi' : 'Akaryakıt İstasyonu',
@@ -736,7 +735,27 @@ async function fetchPoisAlongRoute(trip) {
         openingHours: el.tags && el.tags['opening_hours'],
       });
     });
-    return items;
+
+    // Her örnekleme noktasına en yakın olan mekânı bul, bölge başına en fazla 2 tanesini al
+    // (aksi hâlde rotanın uzun bir bölümü tek bir ilden geçiyorsa liste oraya yığılır)
+    raw.forEach(p => {
+      let bestIdx = 0, bestDist = Infinity;
+      centers.forEach((c, i) => {
+        const d = (c.lat - p.lat) ** 2 + (c.lon - p.lon) ** 2;
+        if (d < bestDist) { bestDist = d; bestIdx = i; }
+      });
+      p.centerIdx = bestIdx;
+    });
+    const perCenterCount = {};
+    const balanced = [];
+    raw.forEach(p => {
+      perCenterCount[p.centerIdx] = perCenterCount[p.centerIdx] || 0;
+      if (perCenterCount[p.centerIdx] < 2) {
+        perCenterCount[p.centerIdx]++;
+        balanced.push(p);
+      }
+    });
+    return balanced;
   } catch (e) { return null; }
 }
 
