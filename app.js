@@ -688,31 +688,73 @@ function weatherCodeToText(code) {
   return map[code] || 'Bilinmiyor';
 }
 
-/* ---------------- MEKÂN BULMA (OpenStreetMap / Overpass — sade ve güvenilir) ---------------- */
+/* ---------------- MEKÂN BULMA (OpenStreetMap / Overpass — rota boyunca, tek noktada değil) ---------------- */
 const CHAIN_BLOCKLIST = ['burger king', 'mcdonald', 'kfc', "domino's", 'dominos', 'pizza hut', 'subway sandwiches', 'popeyes'];
 function isChainName(name) {
   const n = (name || '').toLowerCase();
   return CHAIN_BLOCKLIST.some(c => n.includes(c));
 }
 
+async function fetchPoisAlongRoute(trip) {
+  const geo = trip.geometry;
+  if (!geo || geo.length < 2) return null;
+
+  const activeBreaks = trip.breaks.filter(b => !b.skipped);
+  const points = activeBreaks.length
+    ? activeBreaks.map(b => b.routeFraction)
+    : [0.25, 0.5, 0.75]; // mola yoksa rota boyunca birkaç noktadan ara
+
+  const centers = points.map(f => pointAtFraction(geo, f)).filter(Boolean);
+  if (!centers.length) return null;
+
+  // Sadece gerçek "dinlenme tesisi" (otoyol/anayol servis alanları) + akaryakıt istasyonları
+  const clauses = centers.map(c => `
+    node["highway"="services"](around:3000,${c.lat},${c.lon});
+    way["highway"="services"](around:3000,${c.lat},${c.lon});
+    node["amenity"="fuel"](around:3000,${c.lat},${c.lon});
+  `).join('\n');
+  const query = `[out:json][timeout:25];(${clauses});out center 60;`;
+  try {
+    const res = await fetch('https://overpass-api.de/api/interpreter', { method: 'POST', body: query });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const seen = new Set();
+    const items = [];
+    (data.elements || []).forEach(el => {
+      if (seen.has(el.id)) return;
+      seen.add(el.id);
+      const lat = el.lat || (el.center && el.center.lat);
+      const lon = el.lon || (el.center && el.center.lon);
+      if (!lat || !lon) return;
+      const isServices = el.tags && el.tags.highway === 'services';
+      items.push({
+        id: 'poi_' + el.id,
+        name: (el.tags && el.tags.name) || (isServices ? 'Dinlenme Tesisi' : 'Akaryakıt İstasyonu'),
+        category: isServices ? 'Dinlenme Tesisi' : 'Akaryakıt İstasyonu',
+        lat, lon,
+        openingHours: el.tags && el.tags['opening_hours'],
+      });
+    });
+    return items;
+  } catch (e) { return null; }
+}
+
 async function loadAndRenderPois(trip) {
   const c = document.getElementById('tab-content');
   try {
-    const mid = pointAtFraction(trip.geometry, 0.5);
-    if (!mid) { c.innerHTML = '<div class="error-box">Rota üzerinde mekân aranacak nokta bulunamadı.</div>'; return; }
-
     const relevantBreak = trip.breaks.find(b => !b.skipped) || null;
     const relevantDuration = relevantBreak ? relevantBreak.durationMin : trip.breakDurationMin;
 
-    const pois = await fetchPoisNear(mid.lat, mid.lon, 15000);
+    const pois = await fetchPoisAlongRoute(trip);
     if (!pois || !pois.length) {
-      c.innerHTML = '<div class="warning-box">Bu rota bölümü için doğrulanmış mekân verisi şu anda alınamadı. Farklı bir zamanda tekrar deneyin.</div>';
+      c.innerHTML = '<div class="warning-box">Bu rota için doğrulanmış mekân verisi şu anda alınamadı. Farklı bir zamanda tekrar deneyin.</div>';
       return;
     }
     const filtered = pois.filter(p => !isChainName(p.name));
-    const finalList = filtered.length ? filtered : pois; // filtre her şeyi elerse yine de bir şey göster
+    const finalList = (filtered.length ? filtered : pois).slice(0, 16);
 
-    c.innerHTML = `<p class="hint-text" style="margin-bottom:12px">Rotanın orta noktası civarında bulunan mekânlar, ${relevantDuration} dakikalık molanıza göre işaretlendi.</p>` +
+    c.innerHTML = `<p class="hint-text" style="margin-bottom:12px">Rotanız boyunca, her molanızın civarındaki dinlenme tesisleri ve akaryakıt istasyonları, ${relevantDuration} dakikalık molanıza göre işaretlendi.</p>
+      <div class="warning-box">Bu liste hangi yöne (gidiş/dönüş) hizmet verdiğini doğrulamıyor — bölünmüş otoyollarda karşı yöndeki bir tesis de listeye girmiş olabilir. Rotaya eklemeden önce "Haritada Gör" ile konumun gerçekten gidiş yönünüzde olduğunu kontrol edin.</div>` +
       finalList.map(p => poiCardHTML(p, trip, relevantDuration)).join('');
     bindPoiEvents(trip, finalList);
 
@@ -745,7 +787,7 @@ async function reverseGeocodeLocality(lat, lon) {
 
 function breakSuitability(category, durationMin) {
   const c = (category || '').toLowerCase();
-  const isShort = c.includes('kahve') || c.includes('cafe') || c.includes('coffee') || c.includes('akaryakıt') || c.includes('gas') || c.includes('fuel');
+  const isShort = c.includes('kahve') || c.includes('cafe') || c.includes('coffee') || c.includes('akaryakıt') || c.includes('gas') || c.includes('fuel') || c.includes('dinlenme');
   const isMedium = c.includes('fast food');
   const isLong = c.includes('restoran') || c.includes('restaurant') || (!isShort && !isMedium);
 
