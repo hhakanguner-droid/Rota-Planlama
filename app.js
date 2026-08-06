@@ -472,7 +472,7 @@ function renderTabContent(trip) {
   if (activeTabId === 'ozet') c.innerHTML = renderOzetTab(trip);
   if (activeTabId === 'rotalar') c.innerHTML = renderRotalarTab(trip);
   if (activeTabId === 'molalar') { c.innerHTML = renderMolalarTab(trip); bindMolaEvents(trip); }
-  if (activeTabId === 'mekanlar') { c.innerHTML = '<div class="empty-state">Mekânlar yükleniyor…</div>'; loadAndRenderPois(trip); }
+  if (activeTabId === 'mekanlar') { if (!trip.cachedPois) c.innerHTML = '<div class="empty-state">Mekânlar yükleniyor…</div>'; loadAndRenderPois(trip); }
   if (activeTabId === 'maliyet') { loadAndRenderMaliyet(trip).then(() => bindMaliyetEvents(trip)); }
   if (activeTabId === 'program') c.innerHTML = renderProgramTab(trip);
 }
@@ -595,6 +595,7 @@ function selectRouteOption(routeId) {
   trip.hasFerry = opt.hasFerry;
   trip.ferryNames = opt.ferryNames;
   trip.tollInfo = null; // rota değişti, geçiş verisi tekrar tespit edilecek
+  trip.cachedPois = null; // rota değişti, mekân listesi tekrar aranacak
   trip.addedPois = [];
   generateAutoBreaks(trip);
   recalcTrip(trip);
@@ -699,10 +700,10 @@ async function fetchPoisAlongRoute(trip) {
   const geo = trip.geometry;
   if (!geo || geo.length < 2) return null;
 
-  const activeBreaks = trip.breaks.filter(b => !b.skipped);
-  const points = activeBreaks.length
-    ? activeBreaks.map(b => b.routeFraction)
-    : [0.25, 0.5, 0.75]; // mola yoksa rota boyunca birkaç noktadan ara
+  // Mola sayısından bağımsız: rotanın tamamına sabit aralıklarla yayılmış örnekleme noktaları
+  const sampleCount = Math.min(10, Math.max(5, Math.round(trip.distanceKm / 80)));
+  const points = [];
+  for (let i = 1; i < sampleCount; i++) points.push(i / sampleCount);
 
   const centers = points.map(f => pointAtFraction(geo, f)).filter(Boolean);
   if (!centers.length) return null;
@@ -739,29 +740,49 @@ async function fetchPoisAlongRoute(trip) {
   } catch (e) { return null; }
 }
 
+function nearestFractionOnRoute(geo, lat, lon) {
+  let bestIdx = 0, bestDist = Infinity;
+  for (let i = 0; i < geo.length; i++) {
+    const dLat = geo[i][1] - lat, dLon = geo[i][0] - lon;
+    const d = dLat * dLat + dLon * dLon;
+    if (d < bestDist) { bestDist = d; bestIdx = i; }
+  }
+  return geo.length > 1 ? bestIdx / (geo.length - 1) : 0;
+}
+
 async function loadAndRenderPois(trip) {
   const c = document.getElementById('tab-content');
   try {
     const relevantBreak = trip.breaks.find(b => !b.skipped) || null;
     const relevantDuration = relevantBreak ? relevantBreak.durationMin : trip.breakDurationMin;
 
-    const pois = await fetchPoisAlongRoute(trip);
-    if (!pois || !pois.length) {
-      c.innerHTML = '<div class="warning-box">Bu rota için doğrulanmış mekân verisi şu anda alınamadı. Farklı bir zamanda tekrar deneyin.</div>';
-      return;
+    let finalList = trip.cachedPois;
+    if (!finalList) {
+      const pois = await fetchPoisAlongRoute(trip);
+      if (!pois || !pois.length) {
+        c.innerHTML = '<div class="warning-box">Bu rota için doğrulanmış mekân verisi şu anda alınamadı. Farklı bir zamanda tekrar deneyin.</div>';
+        return;
+      }
+      const filtered = pois.filter(p => !isChainName(p.name));
+      const list = (filtered.length ? filtered : pois).map(p => ({
+        ...p, routeFraction: nearestFractionOnRoute(trip.geometry, p.lat, p.lon),
+      }));
+      list.sort((a, b) => a.routeFraction - b.routeFraction); // gidiş yönünde sırala
+      finalList = list.slice(0, 16);
+      trip.cachedPois = finalList; // aynı rotada tekrar arama yapmamak için önbelleğe al
     }
-    const filtered = pois.filter(p => !isChainName(p.name));
-    const finalList = (filtered.length ? filtered : pois).slice(0, 16);
 
-    c.innerHTML = `<p class="hint-text" style="margin-bottom:12px">Rotanız boyunca, her molanızın civarındaki dinlenme tesisleri ve akaryakıt istasyonları, ${relevantDuration} dakikalık molanıza göre işaretlendi.</p>
+    c.innerHTML = `<p class="hint-text" style="margin-bottom:12px">Rotanız boyunca, gidiş yönünde sıralanmış dinlenme tesisleri ve akaryakıt istasyonları, ${relevantDuration} dakikalık molanıza göre işaretlendi.</p>
       <div class="warning-box">Bu liste hangi yöne (gidiş/dönüş) hizmet verdiğini doğrulamıyor — bölünmüş otoyollarda karşı yöndeki bir tesis de listeye girmiş olabilir. Rotaya eklemeden önce "Haritada Gör" ile konumun gerçekten gidiş yönünüzde olduğunu kontrol edin.</div>` +
       finalList.map(p => poiCardHTML(p, trip, relevantDuration)).join('');
     bindPoiEvents(trip, finalList);
 
     for (const p of finalList) {
+      if (p.locality) continue; // önbellekten geldiyse zaten dolu
       const loc = await reverseGeocodeLocality(p.lat, p.lon);
       const el = document.querySelector(`[data-loc-for="${p.id}"]`);
       if (el) el.textContent = loc || 'Konum bilgisi bulunamadı';
+      p.locality = loc || '—';
       await sleep(1100);
     }
   } catch (e) {
