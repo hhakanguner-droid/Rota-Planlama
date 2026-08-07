@@ -419,6 +419,12 @@ function openTrip(id) {
   showView('trip');
 }
 
+function rerenderTripDetailKeepScroll(trip) {
+  const y = window.scrollY;
+  renderTripDetail(trip);
+  requestAnimationFrame(() => window.scrollTo(0, y));
+}
+
 function renderTripDetail(trip) {
   const el = document.getElementById('trip-detail');
   el.innerHTML = `
@@ -452,10 +458,15 @@ function renderTripDetail(trip) {
     </div>
     <div class="nav-export-row">
       <button onclick="openInGoogleMaps()">Google Maps'te Aç</button>
-      <button onclick="openInAppleMaps()">Apple Haritalar'da Aç</button>
+      ${trip.addedPois.length === 0 ? `<button onclick="openInAppleMaps()">Apple Haritalar'da Aç</button>` : ''}
       <button onclick="exportTripJSON()">JSON Dışa Aktar</button>
       <button onclick="deleteTrip('${trip.id}')" style="color:var(--bad)">Yolculuğu Sil</button>
     </div>
+    ${trip.addedPois.length > 0 ? `
+    <p class="hint-text" style="margin-top:14px">Apple Haritalar aynı anda birden fazla durak açamıyor — bu yolculuğu etap etap açabilirsiniz:</p>
+    <div style="margin-top:8px">
+      ${buildAppleMapsLegs(trip).map((leg, i) => `<button class="secondary-btn" style="width:100%; margin-bottom:8px; text-align:left" onclick="openAppleMapsLeg(${i})">Etap ${i + 1}: ${esc(leg.from.label)} → ${esc(leg.to.label)}</button>`).join('')}
+    </div>` : ''}
   `;
 
   document.querySelectorAll('.tab-btn').forEach(b => {
@@ -518,13 +529,13 @@ function bindMolaEvents(trip) {
   document.querySelectorAll('.brk-duration').forEach(sel => {
     sel.addEventListener('change', () => {
       const b = trip.breaks.find(x => x.id === sel.dataset.brk);
-      if (b) { b.durationMin = +sel.value; recalcTrip(trip); persistCurrentTrip(); renderTripDetail(trip); }
+      if (b) { b.durationMin = +sel.value; recalcTrip(trip); persistCurrentTrip(); rerenderTripDetailKeepScroll(trip); }
     });
   });
   document.querySelectorAll('[data-remove]').forEach(btn => {
     btn.addEventListener('click', () => {
       trip.breaks = trip.breaks.filter(x => x.id !== btn.dataset.remove);
-      recalcTrip(trip); persistCurrentTrip(); renderTripDetail(trip);
+      recalcTrip(trip); persistCurrentTrip(); rerenderTripDetailKeepScroll(trip);
       toast('Mola kaldırıldı, süre güncellendi.');
     });
   });
@@ -535,7 +546,7 @@ function bindMolaEvents(trip) {
       id: 'brk_custom_' + Date.now(), order: n, title: 'Özel Mola', type: 'ozel',
       durationMin: 15, atDriveMinute: trip.driveMinutes, routeFraction: 1,
     });
-    recalcTrip(trip); persistCurrentTrip(); renderTripDetail(trip);
+    recalcTrip(trip); persistCurrentTrip(); rerenderTripDetailKeepScroll(trip);
   });
 }
 
@@ -920,7 +931,7 @@ function bindPoiEvents(trip, pois) {
       trip.addedPois.push({ ...p, extraMinutes: 8, stayMinutes: 20 });
       recalcTrip(trip); persistCurrentTrip();
       toast(`${p.name} rotaya eklendi. Süre ve varış güncellendi.`);
-      renderTripDetail(trip);
+      rerenderTripDetailKeepScroll(trip);
     });
   });
   document.querySelectorAll('[data-fav]').forEach(btn => {
@@ -938,17 +949,50 @@ function bindPoiEvents(trip, pois) {
 }
 
 /* ---------------- NAVİGASYONA AKTARMA ---------------- */
+function poiLabel(p) {
+  return p.name + (p.locality ? `, ${p.locality}` : '');
+}
+function getOrderedStops(trip) {
+  return [...trip.addedPois].sort((a, b) => (a.routeFraction || 0) - (b.routeFraction || 0));
+}
+
 function openInGoogleMaps() {
   const t = state.currentTrip; if (!t) return;
-  const waypoints = t.addedPois.map(p => `${p.lat},${p.lon}`).join('|');
-  let url = `https://www.google.com/maps/dir/?api=1&origin=${t.startCoord.lat},${t.startCoord.lon}&destination=${t.endCoord.lat},${t.endCoord.lon}`;
-  if (waypoints) url += `&waypoints=${encodeURIComponent(waypoints)}`;
+  const stops = getOrderedStops(t);
+  const waypoints = stops.map(p => encodeURIComponent(poiLabel(p))).join('|');
+  const origin = encodeURIComponent(t.start || `${t.startCoord.lat},${t.startCoord.lon}`);
+  const destination = encodeURIComponent(t.end || `${t.endCoord.lat},${t.endCoord.lon}`);
+  let url = `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}`;
+  if (waypoints) url += `&waypoints=${waypoints}`;
   window.open(url, '_blank');
+}
+
+// Apple Haritalar web bağlantısı aynı anda birden fazla ara durak desteklemiyor —
+// bu yüzden durak varsa yolculuğu etap etap açılabilecek bölümlere ayırıyoruz.
+function buildAppleMapsLegs(trip) {
+  const stops = getOrderedStops(trip);
+  const points = [
+    { label: trip.start || `${trip.startCoord.lat},${trip.startCoord.lon}`, lat: trip.startCoord.lat, lon: trip.startCoord.lon },
+    ...stops.map(p => ({ label: poiLabel(p), lat: p.lat, lon: p.lon })),
+    { label: trip.end || `${trip.endCoord.lat},${trip.endCoord.lon}`, lat: trip.endCoord.lat, lon: trip.endCoord.lon },
+  ];
+  const legs = [];
+  for (let i = 0; i < points.length - 1; i++) legs.push({ from: points[i], to: points[i + 1] });
+  return legs;
 }
 function openInAppleMaps() {
   const t = state.currentTrip; if (!t) return;
-  const url = `https://maps.apple.com/?saddr=${t.startCoord.lat},${t.startCoord.lon}&daddr=${t.endCoord.lat},${t.endCoord.lon}&dirflg=d`;
-  window.open(url, '_blank');
+  const origin = encodeURIComponent(t.start || `${t.startCoord.lat},${t.startCoord.lon}`);
+  const destination = encodeURIComponent(t.end || `${t.endCoord.lat},${t.endCoord.lon}`);
+  window.open(`https://maps.apple.com/?saddr=${origin}&daddr=${destination}&dirflg=d`, '_blank');
+}
+function openAppleMapsLeg(idx) {
+  const t = state.currentTrip; if (!t) return;
+  const legs = buildAppleMapsLegs(t);
+  const leg = legs[idx]; if (!leg) return;
+  const s = encodeURIComponent(leg.from.label);
+  const d = encodeURIComponent(leg.to.label);
+  window.open(`https://maps.apple.com/?saddr=${s}&daddr=${d}&dirflg=d`, '_blank');
 }
 function exportTripJSON() {
   const t = state.currentTrip; if (!t) return;
