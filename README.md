@@ -82,3 +82,7 @@ rota-planlayici/
 Bunlar spesifikasyondaki 2–10. aşamalara karşılık geliyor; bu prototip üzerine
 sırayla eklenebilir. Devam etmemi isterseniz hangi aşamadan başlamamı istediğinizi
 söylemeniz yeterli — örneğin "alternatif rotalar" veya "yolculuk modu".
+
+## Handoff Test
+
+Codex ve Claude handoff sistemi başarıyla test ediliyor.
